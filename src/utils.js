@@ -230,7 +230,8 @@ export function softGradient(seed) {
   }
   const hue = hash % 360;
   const hue2 = (hue + 38) % 360;
-  return `linear-gradient(135deg, hsl(${hue} 62% 56%), hsl(${hue2} 64% 44%))`;
+  // 低饱和深色调：字母块在深夜玻璃上不刺眼，与整体极夜色一致
+  return `linear-gradient(135deg, hsl(${hue} 42% 42%), hsl(${hue2} 46% 30%))`;
 }
 
 /** 截断长文本。 */

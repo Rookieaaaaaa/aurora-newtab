@@ -1,5 +1,6 @@
 /* ==========================================================================
    base.css — reset / 设计变量 / 通用控件（按钮、开关、滑块、输入、下拉、对话框、toast）
+   视觉概念「观星窗」：壁纸是风景，控件是窗上的深夜玻璃仪器。
    ========================================================================== */
 
 *,
@@ -19,8 +20,8 @@ body {
     "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   font-size: 14px;
   line-height: 1.5;
-  color: #fff;
-  background: #0a0f14;
+  color: #e9edf6;
+  background: #05070d;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -56,38 +57,45 @@ select {
 }
 
 :focus-visible {
-  outline: 2px solid rgba(120, 180, 255, 0.95);
+  outline: 2px solid rgba(116, 199, 255, 0.85);
   outline-offset: 2px;
 }
 
 /* ---------- 设计变量 ---------- */
 :root {
-  /* 玻璃态（深色背景上使用） */
-  --glass: rgba(255, 255, 255, 0.18);
-  --glass-strong: rgba(255, 255, 255, 0.26);
-  --glass-border: rgba(255, 255, 255, 0.28);
-  --glass-shadow: 0 18px 46px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  /* 深夜玻璃（浮层统一语言：让壁纸当主角） */
+  --glass: rgba(148, 178, 255, 0.07);
+  --glass-strong: rgba(148, 178, 255, 0.13);
+  --glass-line: rgba(180, 200, 255, 0.14);
+  --glass-shadow: 0 18px 48px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 
-  /* 面板（浅色，深色文字） */
-  --panel: rgba(255, 255, 255, 0.94);
-  --panel-soft: rgba(255, 255, 255, 0.72);
-  --panel-line: rgba(16, 24, 40, 0.1);
-  --panel-line-strong: rgba(16, 24, 40, 0.16);
+  /* 面板（深夜底，冷白文字） */
+  --panel: rgba(13, 19, 33, 0.88);
+  --panel-soft: rgba(148, 178, 255, 0.06);
+  --panel-line: rgba(180, 200, 255, 0.1);
+  --panel-line-strong: rgba(180, 200, 255, 0.18);
 
   /* 文字 */
-  --ink: #171c24;
-  --ink-2: #5a6474;
-  --ink-3: #8b94a3;
+  --ink: #e9edf6;
+  --ink-2: #a3aec6;
+  --ink-3: #6d7890;
+
+  /* 极光光谱：完整渐变只给时钟与主按钮，其余单色克制使用 */
+  --aurora-1: #6ff2c8;
+  --aurora-2: #74c7ff;
+  --aurora-3: #b49aff;
+  --aurora-gradient: linear-gradient(120deg, #6ff2c8, #74c7ff 52%, #b49aff);
 
   /* 语义色 */
-  --accent: #2f6df6;
-  --accent-soft: rgba(47, 109, 246, 0.12);
-  --ok: #12a150;
-  --ok-soft: rgba(18, 161, 80, 0.12);
-  --warn: #b7791f;
-  --warn-soft: rgba(214, 158, 46, 0.16);
-  --danger: #d92d20;
-  --danger-soft: rgba(217, 45, 32, 0.1);
+  --accent: #7fe3c9;
+  --accent-soft: rgba(111, 242, 200, 0.12);
+  --link: #8fc9ff;
+  --ok: #5fd39a;
+  --ok-soft: rgba(95, 211, 154, 0.12);
+  --warn: #e8c268;
+  --warn-soft: rgba(232, 194, 104, 0.12);
+  --danger: #f27d72;
+  --danger-soft: rgba(242, 125, 114, 0.12);
 
   /* 形状 */
   --r-sm: 8px;
@@ -114,7 +122,7 @@ select {
 }
 
 .icon-btn:hover {
-  background: rgba(255, 255, 255, 0.18);
+  background: var(--glass-strong);
 }
 
 .icon-btn:active {
@@ -127,15 +135,15 @@ select {
 }
 
 .icon-btn.glass {
-  background: rgba(255, 255, 255, 0.16);
-  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(10, 15, 26, 0.42);
+  border: 1px solid var(--glass-line);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
-  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.22);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.3);
 }
 
 .icon-btn.glass:hover {
-  background: rgba(255, 255, 255, 0.28);
+  background: rgba(148, 178, 255, 0.16);
 }
 
 /* ---------- 文本按钮 ---------- */
@@ -150,9 +158,10 @@ select {
   font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
-  background: rgba(16, 24, 40, 0.06);
+  background: var(--panel-soft);
   color: var(--ink);
-  transition: background var(--t-fast), transform var(--t-fast), color var(--t-fast);
+  transition: background var(--t-fast), transform var(--t-fast), color var(--t-fast),
+    filter var(--t-fast);
 }
 
 .btn svg {
@@ -161,7 +170,7 @@ select {
 }
 
 .btn:hover {
-  background: rgba(16, 24, 40, 0.1);
+  background: var(--glass-strong);
 }
 
 .btn:active {
@@ -169,12 +178,14 @@ select {
 }
 
 .btn.primary {
-  background: var(--accent);
-  color: #fff;
+  background: var(--aurora-gradient);
+  color: #07231c;
+  font-weight: 600;
 }
 
 .btn.primary:hover {
-  background: #1f5be0;
+  background: var(--aurora-gradient);
+  filter: brightness(1.1);
 }
 
 .btn.danger {
@@ -183,7 +194,7 @@ select {
 }
 
 .btn.danger:hover {
-  background: rgba(217, 45, 32, 0.18);
+  background: rgba(242, 125, 114, 0.2);
 }
 
 .btn.ghost {
@@ -192,7 +203,7 @@ select {
 }
 
 .btn.ghost:hover {
-  background: rgba(16, 24, 40, 0.05);
+  background: var(--panel-soft);
 }
 
 .btn.sm {
@@ -235,7 +246,7 @@ select {
   padding: 0 12px;
   border-radius: var(--r-md);
   border: 1px solid var(--panel-line-strong);
-  background: rgba(255, 255, 255, 0.9);
+  background: rgba(5, 8, 16, 0.42);
   color: var(--ink);
   font-size: 13px;
   transition: border-color var(--t-fast), box-shadow var(--t-fast), background var(--t-fast);
@@ -253,24 +264,29 @@ select {
   appearance: none;
   -webkit-appearance: none;
   padding-right: 30px;
-  background-image: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235a6474' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a3aec6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 10px center;
   background-size: 14px;
+}
+
+.select option {
+  background: #0d1321;
+  color: var(--ink);
 }
 
 .input:focus,
 .textarea:focus,
 .select:focus {
   outline: none;
-  border-color: rgba(47, 109, 246, 0.55);
-  box-shadow: 0 0 0 3px rgba(47, 109, 246, 0.14);
-  background: #fff;
+  border-color: rgba(127, 227, 201, 0.55);
+  box-shadow: 0 0 0 3px rgba(111, 242, 200, 0.12);
+  background: rgba(5, 8, 16, 0.6);
 }
 
 .input::placeholder,
 .textarea::placeholder {
-  color: #a9b1be;
+  color: var(--ink-3);
 }
 
 .input-group {
@@ -296,7 +312,7 @@ select {
 }
 
 .input-group .input-eye:hover {
-  background: rgba(16, 24, 40, 0.06);
+  background: var(--panel-soft);
   color: var(--ink-2);
 }
 
@@ -350,7 +366,7 @@ select {
   position: absolute;
   inset: 0;
   border-radius: 999px;
-  background: rgba(16, 24, 40, 0.18);
+  background: rgba(180, 200, 255, 0.18);
   transition: background var(--t-base);
   pointer-events: none;
 }
@@ -364,7 +380,7 @@ select {
   height: 18px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
   transition: transform var(--t-base);
 }
 
@@ -377,7 +393,7 @@ select {
 }
 
 .switch input:focus-visible + span {
-  box-shadow: 0 0 0 3px rgba(47, 109, 246, 0.2);
+  box-shadow: 0 0 0 3px rgba(111, 242, 200, 0.2);
 }
 
 /* ---------- 滑块 ---------- */
@@ -403,7 +419,7 @@ input[type="range"] {
   flex: 1 1 auto;
   height: 4px;
   border-radius: 999px;
-  background: rgba(16, 24, 40, 0.14);
+  background: rgba(180, 200, 255, 0.16);
   outline: none;
 }
 
@@ -413,19 +429,19 @@ input[type="range"]::-webkit-slider-thumb {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #fff;
-  border: 1px solid rgba(16, 24, 40, 0.12);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  background: var(--accent);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
   cursor: pointer;
 }
 
 input[type="range"]::-moz-range-thumb {
   width: 16px;
   height: 16px;
-  border: 1px solid rgba(16, 24, 40, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.35);
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  background: var(--accent);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
   cursor: pointer;
 }
 
@@ -437,7 +453,7 @@ input[type="range"]::-moz-range-thumb {
   gap: 4px;
   padding: 4px;
   border-radius: 12px;
-  background: rgba(16, 24, 40, 0.06);
+  background: rgba(5, 8, 16, 0.4);
 }
 
 .seg button {
@@ -453,10 +469,10 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .seg button[data-active="true"] {
-  background: #fff;
+  background: var(--glass-strong);
   color: var(--ink);
   font-weight: 600;
-  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 /* ---------- toast ---------- */
@@ -481,12 +497,12 @@ input[type="range"]::-moz-range-thumb {
   padding: 9px 16px;
   border-radius: 999px;
   font-size: 13px;
-  color: #fff;
-  background: rgba(22, 28, 36, 0.86);
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--ink);
+  background: rgba(13, 19, 33, 0.9);
+  border: 1px solid var(--glass-line);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
   animation: toast-in 220ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
 }
 
@@ -497,11 +513,13 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .toast[data-type="error"] {
-  background: rgba(150, 32, 26, 0.9);
+  background: rgba(80, 26, 24, 0.92);
+  border-color: rgba(242, 125, 114, 0.35);
 }
 
 .toast[data-type="ok"] {
-  background: rgba(16, 116, 62, 0.9);
+  background: rgba(14, 52, 40, 0.92);
+  border-color: rgba(95, 211, 154, 0.32);
 }
 
 .toast.is-out {
@@ -535,9 +553,9 @@ input[type="range"]::-moz-range-thumb {
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: rgba(8, 12, 18, 0.46);
-  backdrop-filter: blur(3px);
-  -webkit-backdrop-filter: blur(3px);
+  background: rgba(3, 5, 10, 0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--t-base);
@@ -556,9 +574,10 @@ input[type="range"]::-moz-range-thumb {
   border-radius: var(--r-xl);
   background: var(--panel);
   color: var(--ink);
+  border: 1px solid var(--glass-line);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
-  box-shadow: 0 32px 70px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 32px 70px rgba(0, 0, 0, 0.5);
   transform: translateY(14px) scale(0.98);
   opacity: 0;
   transition: transform var(--t-base), opacity var(--t-base);
@@ -589,7 +608,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .modal-head .icon-btn:hover {
-  background: rgba(16, 24, 40, 0.06);
+  background: var(--panel-soft);
   color: var(--ink);
 }
 
@@ -620,11 +639,11 @@ input[type="range"]::-moz-range-thumb {
   min-width: 148px;
   padding: 6px;
   border-radius: 13px;
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid var(--panel-line);
+  background: rgba(13, 19, 33, 0.96);
+  border: 1px solid var(--glass-line);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.4);
   animation: toast-in 140ms ease;
 }
 
@@ -648,7 +667,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .ctx-menu button:hover {
-  background: rgba(16, 24, 40, 0.07);
+  background: var(--panel-soft);
 }
 
 .ctx-menu button.danger {
@@ -668,7 +687,7 @@ input[type="range"]::-moz-range-thumb {
 /* ---------- 通用滚动条 ---------- */
 .scroll-thin {
   scrollbar-width: thin;
-  scrollbar-color: rgba(16, 24, 40, 0.22) transparent;
+  scrollbar-color: rgba(180, 200, 255, 0.22) transparent;
 }
 
 .scroll-thin::-webkit-scrollbar {
@@ -678,7 +697,7 @@ input[type="range"]::-moz-range-thumb {
 
 .scroll-thin::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: rgba(16, 24, 40, 0.2);
+  background: rgba(180, 200, 255, 0.2);
   border: 2px solid transparent;
   background-clip: content-box;
 }
@@ -693,7 +712,7 @@ input[type="range"]::-moz-range-thumb {
   border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
-  background: rgba(16, 24, 40, 0.07);
+  background: var(--panel-soft);
   color: var(--ink-2);
   white-space: nowrap;
 }

@@ -13,7 +13,7 @@ import {
   persistWallhavenBlob,
   resolveWallhaven,
 } from './wallhaven.js';
-import { resolveWeBackground } from './weworkshop.js';
+import { fetchPreviewAssets, resolveWeBackground } from './weworkshop.js';
 
 const FADE_MS = 400;
 const IMAGE_TIMEOUT = 12000;
@@ -550,8 +550,12 @@ export class BackgroundController {
   async apply(settings, first) {
     this.settings = settings;
     const bg = settings.background;
-    this.root.style.setProperty('--bg-blur', `${Number(bg.blur) || 0}px`);
+    const blurPx = Number(bg.blur) || 0;
+    this.root.style.setProperty('--bg-blur', `${blurPx}px`);
     this.root.style.setProperty('--bg-dim', String(Math.min(0.8, Math.max(0, Number(bg.dim) || 0))));
+    // 只有开启模糊时才放大媒体（遮住 blur 造成的边缘透明）；
+    // 清晰展示时保持 1:1 贴合视口，不再额外放大裁切、损失有效分辨率
+    this.root.style.setProperty('--bg-scale', blurPx > 0 ? '1.08' : '1');
 
     const signature = BackgroundController.signatureOf(settings);
     if (signature === this.signature && !first) return;
@@ -708,6 +712,27 @@ export class BackgroundController {
         return { el: img, cleanup: () => {}, pause: () => {}, resume: () => {} };
       };
 
+      // 低清图自动升级：老数据或详情页抓取失败时，record.image 可能只是几百像素的
+      // 缩略图（preview_url / 列表 preview）。铺满高分屏会发糊——加载后量一下实际像素，
+      // 不够屏幕所需宽度就回详情页换全尺寸截图，换不到再保留原图。
+      const loadHdImage = async (url) => {
+        const img = await loadImage(url);
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        const needWidth = Math.max(1280, Math.round((window.innerWidth || 1280) * dpr));
+        const itemId = record.item && record.item.id;
+        if (!itemId || img.naturalWidth >= needWidth) return img;
+        try {
+          const assets = await fetchPreviewAssets(itemId);
+          if (assets && assets.image && assets.image !== url) {
+            const hi = await loadImage(assets.image);
+            if (hi.naturalWidth > img.naturalWidth) return hi;
+          }
+        } catch (err) {
+          console.warn('[background] 全尺寸截图升级失败，保留原图：', err);
+        }
+        return img;
+      };
+
       if (record.video) {
         let video = null;
         try {
@@ -716,14 +741,15 @@ export class BackgroundController {
           console.warn('[background] 工坊视频预加载失败，将使用截图：', err);
         }
         if (video) {
-          // 目标宽度：视口 CSS 宽 × DPR（上限 2，高分屏按 2 倍采样即可观感清晰），下限 1280
+          // 目标宽度：视口 CSS 宽 × DPR（上限 2，高分屏按 2 倍采样即可观感清晰），下限 1280。
+          // 视频宽度达不到屏幕所需就换全尺寸截图，不再把「够 1920」当作清晰的标准
           const dpr = Math.min(2, window.devicePixelRatio || 1);
           const needWidth = Math.max(1280, Math.round((window.innerWidth || 1280) * dpr));
           const videoWidth = video.videoWidth || 0;
-          const videoSharp = !record.image || videoWidth >= needWidth || videoWidth >= 1920;
+          const videoSharp = !record.image || videoWidth >= needWidth;
           if (videoSharp) return makeVideoLayer(video);
           try {
-            const img = await loadImage(record.image);
+            const img = await loadHdImage(record.image);
             return makeImageLayer(img);
           } catch (err) {
             console.warn('[background] 工坊截图加载失败，回退视频：', err);
@@ -733,7 +759,7 @@ export class BackgroundController {
       }
 
       if (!record.image) throw new Error('工坊壁纸没有可用的预览资源');
-      const img = await loadImage(record.image);
+      const img = await loadHdImage(record.image);
       return makeImageLayer(img);
     }
 

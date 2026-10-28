@@ -126,18 +126,31 @@ export async function fetchWallhavenList(options = {}) {
   throw lastError || new Error('壁纸库获取失败');
 }
 
+/** 按当前视口与 DPR 计算请求的最低分辨率（原图越大，铺满屏幕越清晰）。 */
+function preferredAtleast() {
+  try {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = Math.round((window.innerWidth || 1920) * dpr);
+    const h = Math.round((window.innerHeight || 1080) * dpr);
+    if (w >= 2560 || h >= 1440) return '2560x1440';
+  } catch (err) {
+    /* 非浏览器环境按默认值 */
+  }
+  return '1920x1080';
+}
+
 /** 计算某个模式应使用的搜索参数。 */
 function searchParamsFor({ mode, query, categories }) {
   if (mode === 'search' && query) {
-    return { q: query, categories, sorting: 'relevance' };
+    return { q: query, categories, sorting: 'relevance', atleast: preferredAtleast() };
   }
   // daily / random：月度热门榜，质量有保障
-  return { categories, sorting: 'toplist', topRange: '1M' };
+  return { categories, sorting: 'toplist', topRange: '1M', atleast: preferredAtleast() };
 }
 
-/** 当日缓存 key（模式 + 关键词 + 分类一致才复用）。 */
+/** 当日缓存 key（模式 + 关键词 + 分类 + 最低分辨率一致才复用）。 */
 function cacheKeyOf(params) {
-  return `${params.mode}|${params.query}|${params.categories}`;
+  return `${params.mode}|${params.query}|${params.categories}|${preferredAtleast()}`;
 }
 
 /**
@@ -180,7 +193,7 @@ export async function resolveWallhaven(bg) {
 
 /**
  * 拉取壁纸图片本体（blob）。一次下载同时用于展示与本地持久化。
- * 直连失败时依次尝试公共图片中转（wsrv 顺带压到 1920 宽）。
+ * 直连失败时依次尝试公共图片中转（原样转发字节，不压缩，保留原图分辨率）。
  * @param {string} url
  * @param {{relay?:boolean}} [options]
  * @returns {Promise<Blob>}

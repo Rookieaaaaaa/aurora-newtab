@@ -1,5 +1,6 @@
 /* ==========================================================================
    layout.css — 背景层、时钟、搜索框、Dock、响应式
+   时钟是页面唯一用力的视觉记号：极光光谱渐变文字；其余控件退为深夜玻璃。
    ========================================================================== */
 
 /* ------------------------------ 背景 ------------------------------ */
@@ -8,9 +9,10 @@
   inset: 0;
   z-index: 0;
   overflow: hidden;
-  background: #0a0f14;
+  background: #05070d;
   --bg-blur: 0px;
   --bg-dim: 0.22;
+  --bg-scale: 1;
 }
 
 .bg-layer {
@@ -25,7 +27,8 @@
   opacity: 1;
 }
 
-/* 媒体统一放大 1.06，避免 blur 时边缘出现白边 */
+/* 媒体始终 cover 贴合视口，随窗口拉伸自适应；
+   仅开启模糊时由 --bg-scale 放大少许，遮住 blur 边缘（见 background.js） */
 .bg-media {
   position: absolute;
   inset: 0;
@@ -33,7 +36,7 @@
   height: 100%;
   object-fit: cover;
   object-position: center;
-  transform: scale(1.06);
+  transform: scale(var(--bg-scale, 1));
   transform-origin: center;
   filter: blur(var(--bg-blur, 0px));
   transition: filter 180ms ease;
@@ -88,10 +91,32 @@ canvas.bg-media {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 30px;
+  gap: 34px;
   padding: 0 24px 150px;
   pointer-events: none;
   transition: transform var(--t-base);
+  isolation: isolate;
+}
+
+/* 夜色池：时钟与搜索所在的中心区域铺一层极淡的暗色。
+   深色壁纸上几乎不可见，浅色/花哨壁纸上把文字从背景里「托」出来，保证可读性。 */
+.stage::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: -1;
+  width: min(1120px, 94vw);
+  height: min(600px, 68vh);
+  transform: translate(-50%, -54%);
+  background: radial-gradient(
+    closest-side,
+    rgba(4, 7, 14, 0.58) 0%,
+    rgba(4, 7, 14, 0.32) 52%,
+    rgba(4, 7, 14, 0) 78%
+  );
+  filter: blur(16px);
+  pointer-events: none;
 }
 
 .stage > * {
@@ -108,51 +133,60 @@ body.menu-open .stage {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   text-align: center;
   user-select: none;
   color: #fff;
 }
 
 .clock-greeting {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 400;
-  letter-spacing: 3px;
-  opacity: 0.9;
-  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.42);
+  letter-spacing: 5px;
+  text-indent: 5px; /* 抵消末字后的字距，保持视觉居中 */
+  color: rgba(233, 237, 246, 0.88);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45), 0 4px 18px rgba(0, 0, 0, 0.5);
 }
 
 .clock-greeting:empty {
   display: none;
 }
 
+/* 极光光谱只在这里完整出现：青玉 → 冰蓝 → 紫罗兰 */
 .clock-time {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", "PingFang SC", sans-serif;
-  font-size: 96px;
-  font-weight: 300;
-  line-height: 1.04;
-  letter-spacing: -2px;
+  font-family: "Segoe UI Variable Display", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Helvetica Neue", "PingFang SC", sans-serif;
+  font-size: clamp(84px, 11vw, 132px);
+  font-weight: 200;
+  line-height: 1.06;
+  letter-spacing: -0.03em;
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
-  color: #fff;
-  text-shadow: 0 6px 32px rgba(0, 0, 0, 0.35);
+  background: linear-gradient(115deg, #dcfff2 0%, #6ff2c8 30%, #74c7ff 64%, #b49aff 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  /* 双层暗影：贴字的一层保证浅色壁纸上的边缘对比，外扩一层把字从花哨背景里托起 */
+  filter: drop-shadow(0 1px 2px rgba(2, 5, 10, 0.55))
+    drop-shadow(0 6px 26px rgba(2, 5, 10, 0.45));
 }
 
 .clock-time .clock-meridiem {
-  margin-left: 8px;
+  margin-left: 10px;
   font-size: 20px;
   font-weight: 300;
   letter-spacing: 1px;
-  opacity: 0.8;
-  vertical-align: 22px;
+  vertical-align: 26px;
+  -webkit-text-fill-color: rgba(233, 237, 246, 0.8);
 }
 
 .clock-date {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 400;
-  letter-spacing: 1.6px;
-  opacity: 0.9;
-  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.5);
+  letter-spacing: 2px;
+  color: rgba(233, 237, 246, 0.84);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45), 0 4px 18px rgba(0, 0, 0, 0.5);
 }
 
 .clock-date:empty {
@@ -165,22 +199,25 @@ body.menu-open .stage {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: min(720px, 100%);
+  width: min(680px, 100%);
   height: 56px;
   padding: 0 8px;
   border-radius: 28px;
-  background: rgba(255, 255, 255, 0.18);
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  backdrop-filter: blur(18px) saturate(160%);
-  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  background: rgba(10, 15, 26, 0.52);
+  border: 1px solid var(--glass-line);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
   box-shadow: var(--glass-shadow);
   transition: background var(--t-base), box-shadow var(--t-base), border-color var(--t-base);
 }
 
+/* 聚焦时一圈极光描边：深色底 + 光谱边框，光只回应操作 */
 .search:focus-within {
-  background: rgba(255, 255, 255, 0.26);
-  border-color: rgba(255, 255, 255, 0.4);
-  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.32);
+  border-color: transparent;
+  background:
+    linear-gradient(rgba(12, 18, 30, 0.78), rgba(12, 18, 30, 0.78)) padding-box,
+    linear-gradient(115deg, rgba(111, 242, 200, 0.7), rgba(116, 199, 255, 0.7), rgba(180, 154, 255, 0.7)) border-box;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.44), 0 0 34px rgba(116, 199, 255, 0.14);
 }
 
 .search.is-shaking {
@@ -204,9 +241,9 @@ body.menu-open .stage {
   height: 40px;
   padding: 0 11px;
   border-radius: 20px;
-  background: rgba(255, 255, 255, 0.16);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  color: rgba(255, 255, 255, 0.94);
+  background: var(--glass);
+  border: 1px solid rgba(180, 200, 255, 0.1);
+  color: var(--ink);
   font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
@@ -214,7 +251,7 @@ body.menu-open .stage {
 }
 
 .chip:hover {
-  background: rgba(255, 255, 255, 0.24);
+  background: var(--glass-strong);
 }
 
 .chip:active {
@@ -227,7 +264,7 @@ body.menu-open .stage {
   height: 16px;
   align-items: center;
   justify-content: center;
-  opacity: 0.95;
+  color: var(--accent);
 }
 
 .chip-icon svg {
@@ -265,7 +302,7 @@ body.menu-open .stage {
   padding: 0 4px;
   border: 0;
   background: transparent;
-  color: #fff;
+  color: var(--ink);
   font-size: 16px;
   font-weight: 400;
   letter-spacing: 0.2px;
@@ -276,7 +313,7 @@ body.menu-open .stage {
 }
 
 .search-input::placeholder {
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--ink-3);
 }
 
 .search-submit {
@@ -287,14 +324,15 @@ body.menu-open .stage {
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  color: #fff;
-  background: rgba(255, 255, 255, 0.16);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  transition: background var(--t-fast), transform var(--t-fast);
+  color: var(--ink);
+  background: var(--glass);
+  border: 1px solid rgba(180, 200, 255, 0.1);
+  transition: background var(--t-fast), transform var(--t-fast), color var(--t-fast);
 }
 
 .search-submit:hover {
-  background: rgba(255, 255, 255, 0.3);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .search-submit:active {
@@ -317,12 +355,12 @@ body.menu-open .stage {
   gap: 8px;
   padding: 9px 14px;
   border-radius: 14px;
-  background: rgba(22, 28, 36, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(13, 19, 33, 0.9);
+  border: 1px solid var(--glass-line);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.3);
-  color: #fff;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36);
+  color: var(--ink);
   font-size: 13px;
   cursor: pointer;
   animation: toast-in 160ms ease;
@@ -336,7 +374,7 @@ body.menu-open .stage {
 }
 
 .url-hint .u {
-  color: #9fc2ff;
+  color: var(--link);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -347,8 +385,8 @@ body.menu-open .stage {
   padding: 1px 6px;
   border-radius: 5px;
   font-size: 11px;
-  background: rgba(255, 255, 255, 0.16);
-  color: rgba(255, 255, 255, 0.86);
+  background: var(--glass);
+  color: var(--ink-2);
 }
 
 /* 引擎下拉 */
@@ -363,14 +401,14 @@ body.menu-open .stage {
   overscroll-behavior: contain;
   padding: 8px;
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.6);
+  background: rgba(13, 19, 33, 0.96);
+  border: 1px solid var(--glass-line);
   backdrop-filter: blur(26px);
   -webkit-backdrop-filter: blur(26px);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.32);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.44);
   color: var(--ink);
   scrollbar-width: thin;
-  scrollbar-color: rgba(16, 24, 40, 0.22) transparent;
+  scrollbar-color: rgba(180, 200, 255, 0.22) transparent;
   animation: menu-in 160ms cubic-bezier(0.2, 0.9, 0.3, 1.05);
 }
 
@@ -380,7 +418,7 @@ body.menu-open .stage {
 
 .engine-menu::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: rgba(16, 24, 40, 0.22);
+  background: rgba(180, 200, 255, 0.22);
   border: 2px solid transparent;
   background-clip: content-box;
 }
@@ -405,10 +443,9 @@ body.menu-open .stage {
 .engine-menu .menu-group {
   padding: 8px 10px 5px;
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.8px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
   color: var(--ink-3);
-  text-transform: uppercase;
 }
 
 .engine-menu .menu-item {
@@ -449,7 +486,7 @@ body.menu-open .stage {
 
 .engine-menu .menu-item:hover,
 .engine-menu .menu-item[data-active="true"] {
-  background: rgba(47, 109, 246, 0.1);
+  background: var(--panel-soft);
 }
 
 .engine-menu .menu-item[data-selected="true"] .mi-name {
@@ -482,11 +519,11 @@ body.menu-open .stage {
   width: 100%;
   padding: 10px 14px;
   border-radius: 22px;
-  background: rgba(255, 255, 255, 0.18);
-  border: 1px solid rgba(255, 255, 255, 0.26);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  background: rgba(10, 15, 26, 0.5);
+  border: 1px solid var(--glass-line);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .dock-item {
@@ -494,13 +531,13 @@ body.menu-open .stage {
   flex: 0 0 auto;
   width: 44px;
   height: 44px;
-  border-radius: 12px;
+  border-radius: 13px;
   transition: transform var(--t-spring), box-shadow var(--t-base);
 }
 
 .dock-item:hover {
   transform: translateY(-6px) scale(1.12);
-  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.4), 0 0 20px rgba(116, 199, 255, 0.12);
 }
 
 .dock-item:active {
@@ -512,7 +549,7 @@ body.menu-open .stage {
 }
 
 .dock-item.drag-over {
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9), 0 10px 22px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 0 0 2px rgba(127, 227, 201, 0.85), 0 10px 22px rgba(0, 0, 0, 0.36);
 }
 
 .dock-link {
@@ -521,7 +558,7 @@ body.menu-open .stage {
   justify-content: center;
   width: 100%;
   height: 100%;
-  border-radius: 12px;
+  border-radius: 13px;
   overflow: hidden;
   text-decoration: none;
 }
@@ -532,7 +569,7 @@ body.menu-open .stage {
   display: block;
   width: 100%;
   height: 100%;
-  border-radius: 12px;
+  border-radius: 13px;
   overflow: hidden;
 }
 
@@ -546,7 +583,7 @@ body.menu-open .stage {
   inset: 0;
   width: 100%;
   height: 100%;
-  border-radius: 12px;
+  border-radius: 13px;
   object-fit: cover;
   opacity: 0;
   transition: opacity 200ms ease;
@@ -562,8 +599,8 @@ body.menu-open .stage {
   justify-content: center;
   width: 100%;
   height: 100%;
-  border-radius: 12px;
-  color: #fff;
+  border-radius: 13px;
+  color: rgba(255, 255, 255, 0.94);
   font-size: 18px;
   font-weight: 600;
   letter-spacing: 0;
@@ -580,7 +617,7 @@ body.menu-open .stage {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.92);
+  color: rgba(233, 237, 246, 0.92);
   text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
   opacity: 0;
   pointer-events: none;
@@ -621,8 +658,9 @@ body.menu-open .stage {
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: rgba(20, 26, 34, 0.72);
-  color: #fff;
+  background: rgba(13, 19, 33, 0.9);
+  border: 1px solid var(--glass-line);
+  color: var(--ink);
   opacity: 0;
   transform: scale(0.8);
   transition: opacity var(--t-fast), transform var(--t-fast);
@@ -646,10 +684,11 @@ body.menu-open .stage {
   justify-content: center;
   width: 44px;
   height: 44px;
-  border-radius: 12px;
-  border: 1.5px dashed rgba(255, 255, 255, 0.5);
-  color: rgba(255, 255, 255, 0.86);
-  transition: background var(--t-fast), border-color var(--t-fast), transform var(--t-spring);
+  border-radius: 13px;
+  border: 1.5px dashed rgba(180, 200, 255, 0.35);
+  color: var(--ink-2);
+  transition: background var(--t-fast), border-color var(--t-fast), transform var(--t-spring),
+    color var(--t-fast);
 }
 
 .dock-add svg {
@@ -658,37 +697,28 @@ body.menu-open .stage {
 }
 
 .dock-add:hover {
-  background: rgba(255, 255, 255, 0.16);
-  border-color: rgba(255, 255, 255, 0.8);
+  background: var(--glass);
+  border-color: rgba(127, 227, 201, 0.6);
+  color: var(--accent);
   transform: translateY(-4px) scale(1.06);
 }
 
 /* ------------------------------ 响应式 ------------------------------ */
-@media (max-width: 900px) {
-  .clock-time {
-    font-size: 76px;
-  }
-}
-
 @media (max-width: 700px) {
   .stage {
-    gap: 24px;
+    gap: 26px;
     padding-bottom: 132px;
-  }
-
-  .clock-time {
-    font-size: 60px;
-    letter-spacing: -1px;
   }
 
   .clock-greeting {
     font-size: 13px;
-    letter-spacing: 2px;
+    letter-spacing: 3px;
+    text-indent: 3px;
   }
 
   .clock-date {
     font-size: 13px;
-    letter-spacing: 1.2px;
+    letter-spacing: 1.4px;
   }
 
   .search {
@@ -708,7 +738,7 @@ body.menu-open .stage {
 @media (max-width: 560px) {
   .stage {
     padding: 0 14px 128px;
-    gap: 20px;
+    gap: 22px;
   }
 
   .top-bar {
@@ -717,18 +747,18 @@ body.menu-open .stage {
   }
 
   .clock-time {
-    font-size: 46px;
-    letter-spacing: -0.5px;
+    letter-spacing: -0.02em;
   }
 
   .clock-time .clock-meridiem {
     font-size: 14px;
-    vertical-align: 10px;
+    vertical-align: 12px;
   }
 
   .clock-greeting {
     font-size: 12px;
-    letter-spacing: 1.5px;
+    letter-spacing: 2px;
+    text-indent: 2px;
   }
 
   .search {
@@ -791,11 +821,5 @@ body.menu-open .stage {
 
   .dock-add:hover {
     transform: none;
-  }
-}
-
-@media (max-width: 480px) {
-  .clock-time {
-    font-size: 42px;
   }
 }

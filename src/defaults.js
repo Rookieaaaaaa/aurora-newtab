@@ -370,7 +370,8 @@ export function buildWallhavenUrl(params = {}) {
   // 全部锁定 SFW（purity=100），免密钥接口本身也只能拿到 SFW
   url.searchParams.set('purity', '100');
   url.searchParams.set('ratios', 'landscape');
-  url.searchParams.set('atleast', '1920x1080');
+  // 最低分辨率：由调用方按屏幕 DPR 决定（高分屏要更大的原图才清晰）
+  url.searchParams.set('atleast', String(params.atleast || '1920x1080'));
   const q = String(params.q || '').trim();
   if (q) url.searchParams.set('q', q);
   const categories = String(params.categories || '111');
