@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>新标签页</title>
+  <link rel="stylesheet" href="styles/base.css" />
+  <link rel="stylesheet" href="styles/layout.css" />
+  <link rel="stylesheet" href="styles/panels.css" />
+</head>
+<body>
+  <!-- 背景层：双缓冲交叉淡入，避免切换时白闪 -->
+  <div class="bg" id="bg" aria-hidden="true">
+    <div class="bg-layer" id="bg-layer-a" data-active="true"></div>
+    <div class="bg-layer" id="bg-layer-b" data-active="false"></div>
+    <div class="bg-dim" id="bg-dim"></div>
+    <div class="bg-vignette"></div>
+  </div>
+
+  <!-- 右上角工具栏 -->
+  <div class="top-bar">
+    <button class="icon-btn glass" id="btn-weshop" type="button" title="壁纸工坊（Wallpaper Engine 创意工坊）" aria-label="打开壁纸工坊"></button>
+    <button class="icon-btn glass" id="btn-settings" type="button" title="设置" aria-label="打开设置"></button>
+  </div>
+
+  <main class="stage">
+    <section class="clock" id="clock">
+      <div class="clock-greeting" id="clock-greeting"></div>
+      <div class="clock-time" id="clock-time">--:--</div>
+      <div class="clock-date" id="clock-date"></div>
+    </section>
+
+    <div class="search" id="search">
+      <button class="chip" id="engine-chip" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="选择搜索引擎">
+        <span class="chip-icon" id="chip-icon"></span>
+        <span class="chip-label" id="chip-label">元宝 AI 搜索</span>
+        <span class="chip-caret" id="chip-caret"></span>
+      </button>
+      <input
+        class="search-input"
+        id="search-input"
+        type="text"
+        autocomplete="off"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
+        placeholder="问点什么…（AI 搜索）"
+        aria-label="搜索"
+      />
+      <button class="search-submit" id="search-submit" type="button" aria-label="搜索" title="搜索（Enter）"></button>
+      <div class="engine-menu" id="engine-menu" role="listbox" aria-label="搜索引擎" hidden></div>
+      <div class="url-hint" id="url-hint" hidden></div>
+    </div>
+  </main>
+
+  <div class="dock-wrap" id="dock-wrap">
+    <nav class="dock" id="dock" aria-label="常用网站"></nav>
+  </div>
+
+  <div class="settings-backdrop" id="settings-backdrop"></div>
+  <aside class="settings-drawer" id="settings-drawer" aria-label="设置" aria-hidden="true"></aside>
+
+  <section class="we-shop" id="we-shop" aria-label="壁纸工坊" aria-hidden="true" hidden></section>
+
+  <section class="ai-panel" id="ai-panel" aria-label="AI 搜索结果" aria-hidden="true"></section>
+
+  <div class="modal-root" id="modal-root" aria-hidden="true"></div>
+  <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
