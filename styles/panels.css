@@ -2382,3 +2382,37 @@ body.ai-open .stage {
     display: none;
   }
 }
+
+/* 工坊:分辨率下拉(与 chips 同一视觉语言) */
+.ws-select {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #fff;
+  font-size: 12.5px;
+  outline: none;
+  cursor: pointer;
+}
+
+.ws-select:hover {
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+.ws-select option {
+  background: #141a24;
+  color: #e8ecf4;
+}
+
+.ws-meta .ws-age-label,
+.ws-types .ws-age-label {
+  flex: 0 0 auto;
+}
+
+/* 工坊:应用历史面板 */
+.ws-hist .ws-hist-grid {
+  max-height: 56vh;
+  overflow-y: auto;
+  margin-bottom: 10px;
+}

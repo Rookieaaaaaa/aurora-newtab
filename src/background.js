@@ -14,8 +14,15 @@ import {
   resolveWallhaven,
 } from './wallhaven.js';
 import { resolveLocalWeBackground } from './we-local.js';
-import { cloudAssetUrl, isCloudReady, readCloudConfig } from './we-cloud.js';
-import { fetchPreviewAssets, resolveWeBackground } from './weworkshop.js';
+import {
+  cloudAssetUrl,
+  cloudIsCoolingDown,
+  fetchCloudWallpaperCached,
+  isCloudReady,
+  readCloudConfig,
+} from './we-cloud.js';
+import { cacheWeAssetFromUrl, ensureWeWebPrefetch, getCachedWeAsset } from './we-cache.js';
+import { fetchPreviewAssets, recordWeApply, resolveWeBackground } from './weworkshop.js';
 
 const FADE_MS = 400;
 const IMAGE_TIMEOUT = 12000;
@@ -550,6 +557,7 @@ export class BackgroundController {
       // 云端直链相关：改服务地址/开关后需要重新解析背景
       weCloudItemId: bg.weCloudItemId,
       weCloudVideo: bg.weCloudVideo,
+      weCloudWeb: bg.weCloudWeb,
       weCloudUrl: bg.weCloudUrl,
       weCloudEnabled: bg.weCloudEnabled,
     });
@@ -611,6 +619,93 @@ export class BackgroundController {
     }, FADE_MS + 80);
   }
 
+  /**
+   * WE 工坊背景的「占位 + 延迟替换」容器：先从本地缓存读上次预览图立即显示，
+   * 再异步构建真正的层（网页 iframe / 视频 / 原图），就绪后原位替换。
+   * 消除打开新标签页时的串行网络等待黑屏。
+   */
+  makeDeferredWeLayer(bg, buildReal) {
+    const container = document.createElement('div');
+    container.className = 'bg-media we-host';
+    let disposed = false;
+    let current = null;
+
+    const adopt = (layer) => {
+      if (disposed) {
+        if (layer && typeof layer.cleanup === 'function') layer.cleanup();
+        return;
+      }
+      if (current && typeof current.cleanup === 'function') {
+        try {
+          current.cleanup();
+        } catch (err) {
+          /* ignore */
+        }
+      }
+      container.textContent = '';
+      container.appendChild(layer.el);
+      current = layer;
+    };
+
+    // 占位：本地缓存的预览图（仅固定模式；每日轮换当天才解析，无法预知 id）
+    if ((bg.weMode || 'fixed') !== 'daily') {
+      (async () => {
+        try {
+          const pid = String(bg.weCloudItemId || bg.weItemId || '').trim();
+          if (!pid) return;
+          const blob = await getCachedWeAsset(`p:${pid}`);
+          if (!blob || disposed) return;
+          const url = URL.createObjectURL(blob);
+          this.objectUrls.add(url);
+          const img = await loadImage(url, 4000);
+          if (disposed) {
+            this.revokeUrl(url);
+            return;
+          }
+          img.className = 'bg-media';
+          adopt({
+            el: img,
+            cleanup: () => this.revokeUrl(url),
+            pause: () => {},
+            resume: () => {},
+          });
+        } catch (err) {
+          /* 占位失败不影响主流程 */
+        }
+      })();
+    }
+
+    // 真正的层：网络就绪后替换
+    (async () => {
+      try {
+        const layer = await buildReal();
+        adopt(layer);
+      } catch (err) {
+        console.warn('[background] 工坊背景构建失败，保留占位：', err);
+      }
+    })();
+
+    return {
+      el: container,
+      cleanup: () => {
+        disposed = true;
+        if (current && typeof current.cleanup === 'function') {
+          try {
+            current.cleanup();
+          } catch (err) {
+            /* ignore */
+          }
+        }
+      },
+      pause: () => {
+        if (current && typeof current.pause === 'function') current.pause();
+      },
+      resume: () => {
+        if (current && typeof current.resume === 'function') current.resume();
+      },
+    };
+  }
+
   /** 构造单层内容。 */
   async buildLayer(bg) {
     const type = bg.type;
@@ -667,212 +762,325 @@ export class BackgroundController {
     }
 
     if (type === 'we') {
-      // Wallpaper Engine 创意工坊：分辨率自适应——
-      // 工坊预览视频多为 720p webm，铺满高分屏会发糊；视频元数据不够屏幕宽度时
-      // 改用全尺寸截图，截图加载失败再回视频，两者都失败才报错
-      // 本地 WE 原图优先：Steam 只给 1024 方形压缩件，而本地壁纸库里
-      // 是作者上传的原图（实测最高 1431px）。取不到再走 Steam。
-      let localObjectUrl = '';
-      let record = null;
+      // 整层延迟构建：先用本地缓存的上次预览图占位（毫秒级），
+    // 云端素材（网页/视频/原图）就绪后原位替换，消除首屏黑屏
+      return this.makeDeferredWeLayer(bg, async () => {
+        // Wallpaper Engine 创意工坊：分辨率自适应——
+        // 工坊预览视频多为 720p webm，铺满高分屏会发糊；视频元数据不够屏幕宽度时
+        // 改用全尺寸截图，截图加载失败再回视频，两者都失败才报错
+        // 本地 WE 原图优先：Steam 只给 1024 方形压缩件，而本地壁纸库里
+        // 是作者上传的原图（实测最高 1431px）。取不到再走 Steam。
+        let localObjectUrl = '';
+        let record = null;
 
-      /** 当前云服务配置（未配置或异常返回 null）。 */
-      let cloudConfig = null;
-      try {
-        const cfg = readCloudConfig(bg, this.getSecrets());
-        if (isCloudReady(cfg)) cloudConfig = cfg;
-      } catch (err) {
-        /* 配置异常就当没配 */
-      }
-
-      /** 回落链：本地 WE 原图 > Steam 预览。 */
-      const resolveFallback = async () => {
-        if (bg.weLocalMediaId) {
-          try {
-            const local = await resolveLocalWeBackground(bg);
-            if (local) {
-              localObjectUrl = local.image;
-              return local;
-            }
-          } catch (err) {
-            /* 本地缓存失效就继续回落到 Steam */
-          }
-        }
-        // 每日轮换模式下，云端优先的判定在 resolveWeBackground 内部完成
-        return resolveWeBackground(bg, cloudConfig);
-      };
-
-      // 优先级：云端直链 > 本地 WE 目录 > Steam 预览
-      // 云端是唯一能拿到作者原图与完整 mp4 的途径，且一个字节都不落在本地
-      if (bg.weCloudItemId && cloudConfig) {
+        /** 当前云服务配置（未配置或异常返回 null）。 */
+        let cloudConfig = null;
         try {
-          const cloudId = String(bg.weCloudItemId);
-          const image = cloudAssetUrl(cloudConfig, cloudId, 'preview');
-          const video = bg.weCloudVideo ? cloudAssetUrl(cloudConfig, cloudId, 'video') : '';
-          if (image) {
-            record = { image, video, item: { id: cloudId, title: bg.weTitle || '', cloud: true } };
+          const cfg = readCloudConfig(bg, this.getSecrets());
+          if (isCloudReady(cfg)) cloudConfig = cfg;
+        } catch (err) {
+          /* 配置异常就当没配 */
+        }
+
+        /** 回落链：本地 WE 原图 > Steam 预览。 */
+        const resolveFallback = async () => {
+          if (bg.weLocalMediaId) {
+            try {
+              const local = await resolveLocalWeBackground(bg);
+              if (local) {
+                localObjectUrl = local.image;
+                return local;
+              }
+            } catch (err) {
+              /* 本地缓存失效就继续回落到 Steam */
+            }
           }
-        } catch (err) {
-          /* 云端配置异常就直接走回落链 */
-        }
-      }
-      if (!record) record = await resolveFallback();
-
-      /** 本地原图是 blob 地址，图层销毁时释放。 */
-      const releaseLocalUrl = () => {
-        if (!localObjectUrl) return;
-        try {
-          URL.revokeObjectURL(localObjectUrl);
-        } catch (err) {
-          /* ignore */
-        }
-        localObjectUrl = '';
-      };
-      // 显示方式：cover 填满裁切（默认，整屏无黑边）；contain 完整显示（等比缩放留边）
-      const containFit = bg.weFit === 'contain';
-      const applyFit = (el) => {
-        el.style.objectFit = containFit ? 'contain' : '';
-        el.style.transform = containFit ? 'none' : '';
-      };
-
-      const makeVideoLayer = (video) => {
-        video.className = 'bg-media';
-        video.dataset.objectUrl = '';
-        video.preload = 'auto';
-        applyFit(video);
-        const playPromise = video.play();
-        if (playPromise && typeof playPromise.catch === 'function') playPromise.catch(() => {});
-        return {
-          el: video,
-          cleanup: () => {
-            try {
-              video.pause();
-            } catch (err) {
-              /* ignore */
-            }
-            video.removeAttribute('src');
-            try {
-              video.load();
-            } catch (err) {
-              /* ignore */
-            }
-          },
-          pause: () => {
-            try {
-              video.pause();
-            } catch (err) {
-              /* ignore */
-            }
-          },
-          resume: () => {
-            const promise = video.play();
-            if (promise && typeof promise.catch === 'function') promise.catch(() => {});
-          },
+          // 每日轮换模式下，云端优先的判定在 resolveWeBackground 内部完成
+          return resolveWeBackground(bg, cloudConfig);
         };
-      };
 
-      // 比例差过大时（Steam 的工坊预览是方形件），cover 会把画面裁得只剩中间一条。
-      // 改用「完整显示 + 同图虚化铺底」：画布任意尺寸都能填满，画面不裁切、不放大。
-      const composeLayer = (img) => {
-        const box = document.createElement('div');
-        box.className = 'bg-media bg-compose';
-        const fill = document.createElement('img');
-        fill.className = 'bg-fill';
-        fill.alt = '';
-        fill.referrerPolicy = 'no-referrer';
-        fill.src = img.src;
-        img.className = 'bg-frame';
-        img.style.objectFit = '';
-        img.style.transform = '';
-        box.append(fill, img);
-        return { el: box, cleanup: releaseLocalUrl, pause: () => {}, resume: () => {} };
-      };
-
-      const makeImageLayer = (img) => {
-        const vw = window.innerWidth || 1280;
-        const vh = window.innerHeight || 720;
-        const screenRatio = vw / vh;
-        const imgRatio =
-          img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : screenRatio;
-        const ratioGap = Math.abs(imgRatio - screenRatio) / screenRatio;
-        // contain 模式本来就要完整画面；cover 模式仅在比例差超过 15% 时才介入
-        if (containFit || ratioGap > 0.15) return composeLayer(img);
-        img.className = 'bg-media';
-        img.dataset.objectUrl = '';
-        applyFit(img);
-        return { el: img, cleanup: releaseLocalUrl, pause: () => {}, resume: () => {} };
-      };
-
-      // 低清图自动升级：老数据或详情页抓取失败时，record.image 可能只是几百像素的
-      // 缩略图（preview_url / 列表 preview）。铺满高分屏会发糊——加载后量一下实际像素，
-      // 不够屏幕所需宽度就回详情页换全尺寸截图，换不到再保留原图。
-      const loadHdImage = async (url) => {
-        const img = await loadImage(url);
-        const dpr = Math.min(2, window.devicePixelRatio || 1);
-        const needWidth = Math.max(1280, Math.round((window.innerWidth || 1280) * dpr));
-        const itemId = record.item && record.item.id;
-        // 只有明显是缩略图（< 900px）才值得回详情页找更大图；
-        // 1024 的工坊官方预览已是原图，反复请求只会白白多一次网络
-        if (!itemId || img.naturalWidth >= Math.min(needWidth, 900)) return img;
-        try {
-          const assets = await fetchPreviewAssets(itemId);
-          if (assets && assets.image && assets.image !== url) {
-            const hi = await loadImage(assets.image);
-            if (hi.naturalWidth > img.naturalWidth) return hi;
-          }
-        } catch (err) {
-          console.warn('[background] 全尺寸截图升级失败，保留原图：', err);
-        }
-        return img;
-      };
-
-      // 云端直链：有视频就优先播（这才是 4K 动态壁纸的意义），否则用作者原图。
-      // 两者都拿不到说明服务不可达 → 回落本地/Steam，不能整个背景塌成渐变
-      if (record.item && record.item.cloud) {
-        if (record.video) {
+        // 优先级：云端直链 > 本地 WE 目录 > Steam 预览
+        // 云端是唯一能拿到作者原图与完整 mp4 的途径，且一个字节都不落在本地
+        if (bg.weCloudItemId && cloudConfig && !cloudIsCoolingDown()) {
           try {
-            const video = await probeVideoMeta(record.video);
-            if (video) return makeVideoLayer(video);
+            const cloudId = String(bg.weCloudItemId);
+            // 每次渲染查一次云端最新状态：应用那一刻云端可能还在下载（video 标记
+            // 为 false），不能拿旧标记判一辈子——就绪后自动升级到原片
+            const fresh = await fetchCloudWallpaperCached(cloudConfig, cloudId);
+            if (fresh && fresh.state === 'ready') {
+              record = {
+                image: cloudAssetUrl(cloudConfig, cloudId, 'preview'),
+                video: fresh.video ? cloudAssetUrl(cloudConfig, cloudId, 'video') : '',
+                // 网页壁纸：云端 serve 项目目录时给 iframe 入口，起始页真实运行
+                webUrl: fresh.web ? cloudAssetUrl(cloudConfig, cloudId, 'web') : '',
+                item: { id: cloudId, title: bg.weTitle || '', cloud: true },
+              };
+              recordWeApply({
+                id: cloudId,
+                title: bg.weTitle || '',
+                preview: String(bg.weImage || ''),
+              });
+            }
+            /* 未就绪（下载中/失败）→ record 为空，走回落链，下次打开再试 */
           } catch (err) {
-            console.warn('[background] 云端视频加载失败，改用云端原图：', err);
+            /* 云端配置异常就直接走回落链 */
           }
         }
-        try {
-          const img = await loadImage(record.image, IMAGE_TIMEOUT);
-          return makeImageLayer(img);
-        } catch (err) {
-          console.warn('[background] 云端壁纸加载失败，回落到本地 / Steam：', err);
-          record = await resolveFallback();
-        }
-      }
+        if (!record) record = await resolveFallback();
 
-      if (record.video) {
-        let video = null;
-        try {
-          video = await probeVideoMeta(record.video);
-        } catch (err) {
-          console.warn('[background] 工坊视频预加载失败，将使用截图：', err);
-        }
-        if (video) {
-          // 目标宽度：视口 CSS 宽 × DPR（上限 2，高分屏按 2 倍采样即可观感清晰），下限 1280。
-          // 视频宽度达不到屏幕所需就换全尺寸截图，不再把「够 1920」当作清晰的标准
+        /** 本地原图是 blob 地址，图层销毁时释放。 */
+        const releaseLocalUrl = () => {
+          if (!localObjectUrl) return;
+          try {
+            URL.revokeObjectURL(localObjectUrl);
+          } catch (err) {
+            /* ignore */
+          }
+          localObjectUrl = '';
+        };
+        // 显示方式：cover 填满裁切（默认，整屏无黑边）；contain 完整显示（等比缩放留边）
+        const containFit = bg.weFit === 'contain';
+        const applyFit = (el) => {
+          el.style.objectFit = containFit ? 'contain' : '';
+          el.style.transform = containFit ? 'none' : '';
+        };
+
+        const makeVideoLayer = (video) => {
+          video.className = 'bg-media';
+          video.dataset.objectUrl = '';
+          video.preload = 'auto';
+          applyFit(video);
+          const playPromise = video.play();
+          if (playPromise && typeof playPromise.catch === 'function') playPromise.catch(() => {});
+          return {
+            el: video,
+            cleanup: () => {
+              try {
+                video.pause();
+              } catch (err) {
+                /* ignore */
+              }
+              video.removeAttribute('src');
+              try {
+                video.load();
+              } catch (err) {
+                /* ignore */
+              }
+            },
+            pause: () => {
+              try {
+                video.pause();
+              } catch (err) {
+                /* ignore */
+              }
+            },
+            resume: () => {
+              const promise = video.play();
+              if (promise && typeof promise.catch === 'function') promise.catch(() => {});
+            },
+          };
+        };
+
+        const makeWebLayer = (url) => {
+          const frame = document.createElement('iframe');
+          frame.className = 'bg-media we-web-frame';
+          frame.src = url;
+          frame.title = '网页壁纸';
+          // 沙箱:allow-same-origin 让壁纸能用自己的源(wall.xiaobai.uno)访问
+          // localStorage——绝大多数网页壁纸启动就读它,不给这条会直接抛
+          // SecurityError 黑屏。壁纸代码因此与云服务同源(能读到自身 URL 里的
+          // token),只浏览可信作者的壁纸
+          frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-pointer-lock');
+          frame.setAttribute('scrolling', 'no');
+          frame.style.border = '0';
+          return {
+            el: frame,
+            cleanup: () => {
+              frame.setAttribute('src', 'about:blank');
+            },
+            // 隐藏/最小化时浏览器会自动节流 iframe 的 rAF 与定时器,无需手动暂停
+            pause: () => {},
+            resume: () => {},
+          };
+        };
+
+        // 探测网页入口是否真的可用(服务端没实现 web 目录 / 没带 ?token= 鉴权时
+        // 会 404/401,那种情况下静默回落图片/视频,不能给用户看一个白色错误页)
+        const probeWebEntry = async (url) => {
+          try {
+            const res = await fetch(url);
+            if (!res.ok) return false;
+            return (res.headers.get('content-type') || '').includes('html');
+          } catch (err) {
+            return false;
+          }
+        };
+
+        // 比例差过大时（Steam 的工坊预览是方形件），cover 会把画面裁得只剩中间一条。
+        // 改用「完整显示 + 同图虚化铺底」：画布任意尺寸都能填满，画面不裁切、不放大。
+        const composeLayer = (img) => {
+          const box = document.createElement('div');
+          box.className = 'bg-media bg-compose';
+          const fill = document.createElement('img');
+          fill.className = 'bg-fill';
+          fill.alt = '';
+          fill.referrerPolicy = 'no-referrer';
+          fill.src = img.src;
+          img.className = 'bg-frame';
+          img.style.objectFit = '';
+          img.style.transform = '';
+          box.append(fill, img);
+          return { el: box, cleanup: releaseLocalUrl, pause: () => {}, resume: () => {} };
+        };
+
+        const makeImageLayer = (img) => {
+          // 显示方式由用户设置说了算：cover 铺满裁切（方形图会裁掉上下，这是铺满的
+          // 代价）；contain 完整显示 + 同图虚化铺底。不再自作主张按比例差强制切换
+          if (containFit) return composeLayer(img);
+          img.className = 'bg-media';
+          img.dataset.objectUrl = '';
+          applyFit(img);
+          return { el: img, cleanup: releaseLocalUrl, pause: () => {}, resume: () => {} };
+        };
+
+        // 低清图自动升级：老数据或详情页抓取失败时，record.image 可能只是几百像素的
+        // 缩略图（preview_url / 列表 preview）。铺满高分屏会发糊——加载后量一下实际像素，
+        // 不够屏幕所需宽度就回详情页换全尺寸截图，换不到再保留原图。
+        const loadHdImage = async (url) => {
+          const img = await loadImage(url);
           const dpr = Math.min(2, window.devicePixelRatio || 1);
           const needWidth = Math.max(1280, Math.round((window.innerWidth || 1280) * dpr));
-          const videoWidth = video.videoWidth || 0;
-          const videoSharp = !record.image || videoWidth >= needWidth;
-          if (videoSharp) return makeVideoLayer(video);
+          const itemId = record.item && record.item.id;
+          // 只有明显是缩略图（< 900px）才值得回详情页找更大图；
+          // 1024 的工坊官方预览已是原图，反复请求只会白白多一次网络
+          if (!itemId || img.naturalWidth >= Math.min(needWidth, 900)) return img;
           try {
-            const img = await loadHdImage(record.image);
+            const assets = await fetchPreviewAssets(itemId);
+            if (assets && assets.image && assets.image !== url) {
+              const hi = await loadImage(assets.image);
+              if (hi.naturalWidth > img.naturalWidth) return hi;
+            }
+          } catch (err) {
+            console.warn('[background] 全尺寸截图升级失败，保留原图：', err);
+          }
+          return img;
+        };
+
+        // 云端直链：网页壁纸可真实运行时优先 iframe；其次视频（这才是 4K 动态壁纸的
+        // 意义）；否则作者原图。都拿不到说明服务不可达 → 回落本地/Steam，不能整个
+        // 背景塌成渐变
+        if (record.item && record.item.cloud) {
+          const cloudId = record.item.id;
+          if (record.webUrl) {
+            const webOk = await probeWebEntry(record.webUrl);
+            if (webOk) {
+              // 网页壁纸跑起来了 → 后台把整包文件拉进浏览器本地缓存，
+              // 完成后 iframe 的所有请求都命中磁盘，零服务器流量
+              ensureWeWebPrefetch(cloudConfig, cloudId).catch(() => {});
+              // 预览图也入 LRU 缓存：下次打开新标签页可秒出占位画面
+              if (record.image) {
+                cacheWeAssetFromUrl(record.image, `p:${cloudId}`).catch(() => {});
+              }
+              return makeWebLayer(record.webUrl);
+            }
+            console.warn('[background] 云端网页入口不可用，回落图片/视频素材');
+          }
+
+          // 本地资产缓存（最近 5 张壁纸，LRU）：命中就不吃服务器流量、秒开。
+          // 视频未命中时先走直链流式播（不阻塞首屏），后台把整片拉回本地，
+          // 下一次打开新标签页即本地播放
+          try {
+            let videoBlob = record.video ? await getCachedWeAsset(`v:${cloudId}`) : null;
+            if (record.video && !videoBlob) {
+              cacheWeAssetFromUrl(record.video, `v:${cloudId}`).catch(() => {});
+            }
+            if (videoBlob) {
+              const blobUrl = URL.createObjectURL(videoBlob);
+              this.objectUrls.add(blobUrl);
+              try {
+                const video = await probeVideoMeta(blobUrl);
+                const layer = makeVideoLayer(video);
+                const baseCleanup = layer.cleanup;
+                layer.cleanup = () => {
+                  baseCleanup();
+                  this.revokeUrl(blobUrl);
+                };
+                return layer;
+              } catch (err) {
+                this.revokeUrl(blobUrl);
+              }
+            }
+
+            let previewBlob = await getCachedWeAsset(`p:${cloudId}`);
+            if (!previewBlob && record.image) {
+              previewBlob = await cacheWeAssetFromUrl(record.image, `p:${cloudId}`);
+            }
+            if (previewBlob) {
+              const blobUrl = URL.createObjectURL(previewBlob);
+              this.objectUrls.add(blobUrl);
+              try {
+                const img = await loadImage(blobUrl, IMAGE_TIMEOUT);
+                const layer = makeImageLayer(img);
+                const baseCleanup = layer.cleanup;
+                layer.cleanup = () => {
+                  baseCleanup();
+                  this.revokeUrl(blobUrl);
+                };
+                return layer;
+              } catch (err) {
+                this.revokeUrl(blobUrl);
+              }
+            }
+          } catch (err) {
+            console.warn('[background] 本地资产缓存异常，走云端直链：', err);
+          }
+
+          if (record.video) {
+            try {
+              const video = await probeVideoMeta(record.video);
+              if (video) return makeVideoLayer(video);
+            } catch (err) {
+              console.warn('[background] 云端视频加载失败，改用云端原图：', err);
+            }
+          }
+          try {
+            const img = await loadImage(record.image, IMAGE_TIMEOUT);
             return makeImageLayer(img);
           } catch (err) {
-            console.warn('[background] 工坊截图加载失败，回退视频：', err);
-            return makeVideoLayer(video);
+            console.warn('[background] 云端壁纸加载失败，回落到本地 / Steam：', err);
+            record = await resolveFallback();
           }
         }
-      }
 
-      if (!record.image) throw new Error('工坊壁纸没有可用的预览资源');
-      const img = await loadHdImage(record.image);
-      return makeImageLayer(img);
+        if (record.video) {
+          let video = null;
+          try {
+            video = await probeVideoMeta(record.video);
+          } catch (err) {
+            console.warn('[background] 工坊视频预加载失败，将使用截图：', err);
+          }
+          if (video) {
+            // 目标宽度：视口 CSS 宽 × DPR（上限 2，高分屏按 2 倍采样即可观感清晰），下限 1280。
+            // 视频宽度达不到屏幕所需就换全尺寸截图，不再把「够 1920」当作清晰的标准
+            const dpr = Math.min(2, window.devicePixelRatio || 1);
+            const needWidth = Math.max(1280, Math.round((window.innerWidth || 1280) * dpr));
+            const videoWidth = video.videoWidth || 0;
+            const videoSharp = !record.image || videoWidth >= needWidth;
+            if (videoSharp) return makeVideoLayer(video);
+            try {
+              const img = await loadHdImage(record.image);
+              return makeImageLayer(img);
+            } catch (err) {
+              console.warn('[background] 工坊截图加载失败，回退视频：', err);
+              return makeVideoLayer(video);
+            }
+          }
+        }
+
+        if (!record.image) throw new Error('工坊壁纸没有可用的预览资源');
+        const img = await loadHdImage(record.image);
+        return makeImageLayer(img);
+      });
     }
 
     if (type === 'static') {

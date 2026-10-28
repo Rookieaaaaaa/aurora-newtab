@@ -19,6 +19,8 @@
  */
 
 import { getPath, sleep } from './utils.js';
+import { STORAGE_KEYS } from './defaults.js';
+import { getRaw, setRaw } from './storage.js';
 
 /** 单次请求的默认超时（毫秒）。Steam 下载是异步的，接口本身应该秒回。 */
 const DEFAULT_TIMEOUT = 15000;
@@ -115,8 +117,60 @@ function buildUrl(config, path, params) {
  */
 export function cloudAssetUrl(config, id, asset) {
   if (!isCloudReady(config) || !id) return '';
-  const name = asset === 'video' ? 'video.mp4' : 'preview.jpg';
+  const name = asset === 'video' ? 'video.mp4' : asset === 'web' ? 'web/index.html' : 'preview.jpg';
   return buildUrl(config, `wallpaper/${encodeURIComponent(id)}/${name}`);
+}
+
+/**
+ * Steam 图片中转：images.steamusercontent.com 在国内路由极差（单张 13 秒+），
+ * 浏览页给的还是全尺寸原图（约 900KB/张）。云端网络好，代拉一次缓存住，
+ * 缩到指定宽度再回给浏览器，列表秒开。
+ * @param {{url:string, token:string}} config
+ * @param {string} sourceUrl Steam 图片原始地址
+ * @param {number} [width] 目标宽度（服务端按宽等比缩小，webp 输出）
+ * @returns {string} 未配置云端或源地址非 Steam 图床时返回空串
+ */
+export function cloudThumbUrl(config, sourceUrl, width = 512) {
+  if (!isCloudReady(config)) return '';
+  const source = String(sourceUrl || '');
+  if (!/^https:\/\/([\w.-]*steamstatic\.com|[\w.-]*steamuserimages-a\.akamaihd\.net|images\.steamusercontent\.com)\//.test(source)) {
+    return '';
+  }
+  return buildUrl(config, 'thumb', { u: source, w: width });
+}
+
+/**
+ * 网页壁纸包内任意文件的直链（带 token）。
+ * @param {{url:string, token:string}} config
+ * @param {string} id
+ * @param {string} path 包内相对路径（index.html / app.js / media/.../xxx.webm）
+ * @returns {string}
+ */
+export function webAssetUrl(config, id, path) {
+  if (!isCloudReady(config) || !id || !path) return '';
+  const clean = String(path).replace(/^\/+/, '');
+  return buildUrl(config, `wallpaper/${encodeURIComponent(id)}/web/${clean}`);
+}
+
+/**
+ * 拉取网页壁纸的完整文件清单（云端遍历项目目录生成）。
+ * @param {{url:string, token:string}} config
+ * @param {string} id
+ * @returns {Promise<string[]>} 失败/端点不存在时返回空数组
+ */
+export async function fetchWebFileList(config, id) {
+  try {
+    const data = await requestCloud(config, `wallpaper/${encodeURIComponent(id)}/web/files`, {
+      timeout: 10000,
+    });
+    const files = data && (data.files || data.list || data);
+    if (!Array.isArray(files)) return [];
+    return files
+      .map((row) => String(typeof row === 'string' ? row : row && row.path).replace(/^\/+/, ''))
+      .filter(Boolean);
+  } catch (err) {
+    return [];
+  }
 }
 
 /**
@@ -193,17 +247,23 @@ export function normalizeCloudRecord(data, fallbackId) {
   const preview = raw.preview && typeof raw.preview === 'object' ? raw.preview : {};
   const video = raw.video && typeof raw.video === 'object' ? raw.video : null;
   const state = String(raw.state || '').toLowerCase();
+  // 服务端偶发把网页入口误报成视频（video.file=index.html）——这种"视频"
+  // 不能要，否则界面出现「完整视频 0.0MB」、背景引擎还会拿它当 mp4 播
+  const videoLooksFake =
+    !video || !Number(video.bytes) || /\.html?$/i.test(String(video.file || ''));
   return {
     id: String(raw.id || fallbackId || ''),
     state: state || 'unknown',
     title: String(raw.title || ''),
     type: String(raw.type || '').toLowerCase(),
+    // 网页壁纸：服务端检测到项目根目录有 index.html 时置 true，直链 web/index.html 可用
+    web: raw.web === true || String(raw.type || '').toLowerCase() === 'web',
     preview: {
       width: Number(preview.width) || 0,
       height: Number(preview.height) || 0,
       bytes: Number(preview.bytes) || 0,
     },
-    video: video
+    video: video && !videoLooksFake
       ? {
           file: String(video.file || ''),
           bytes: Number(video.bytes) || 0,
@@ -293,6 +353,31 @@ export async function waitCloudReady(config, id, options = {}) {
     if (last && TERMINAL_STATES.has(last.state)) return last;
   }
   return last;
+}
+
+/**
+ * 带本地 TTL 缓存的元数据查询：ready 状态的记录（视频/网页标记）短期内不会变，
+ * 每次打开新标签页都真请求接口纯属浪费——命中缓存零网络、毫秒返回。
+ * 非 ready 状态不缓存（downloading→ready 需要尽快反映到界面）。
+ */
+export async function fetchCloudWallpaperCached(config, id, ttlMs = 6 * 3600 * 1000) {
+  const key = `${config.url}|${id}`;
+  const map = (await getRaw(STORAGE_KEYS.weCloudMeta).catch(() => null)) || {};
+  const hit = map[key];
+  if (hit && hit.data && Date.now() - (hit.at || 0) < ttlMs) {
+    return normalizeCloudRecord(hit.data, id);
+  }
+  const record = await fetchCloudWallpaper(config, id);
+  if (record && record.state === 'ready') {
+    map[key] = { at: Date.now(), data: record };
+    const keys = Object.keys(map);
+    if (keys.length > 50) {
+      keys.sort((a, b) => (map[a].at || 0) - (map[b].at || 0));
+      for (const stale of keys.slice(0, keys.length - 50)) delete map[stale];
+    }
+    await setRaw(STORAGE_KEYS.weCloudMeta, map).catch(() => false);
+  }
+  return record;
 }
 
 /** 状态 → 可读文案（tone 供 UI 上色）。 */

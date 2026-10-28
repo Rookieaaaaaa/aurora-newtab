@@ -11,6 +11,9 @@ import { describeError, getPath } from './utils.js';
 import {
   cloudAssetUrl,
   cloudIsCoolingDown,
+  fetchWebFileList,
+  webAssetUrl,
+  cloudThumbUrl,
   describeCloudMedia,
   describeCloudState,
   fetchCloudLibraryIds,
@@ -20,6 +23,7 @@ import {
   readCloudConfig,
   waitCloudReady,
 } from './we-cloud.js';
+import { getHandoffDir, getLivelyDir, saveHandoffDir, saveLivelyDir, writeDirFile, writeHandoffFile } from './we-cache.js';
 import {
   getLocalPreviewUrl,
   getLocalWallpaper,
@@ -28,16 +32,21 @@ import {
 } from './we-local.js';
 import {
   KIND_LABELS,
+  WE_AGES,
+  WE_RESOLUTIONS,
   WE_SORTS,
   WE_TAGS,
+  WE_TYPES,
   browseWorkshop,
   buildApplySteamUrl,
   fetchDetails,
   fetchPreviewAssets,
   getSteamSession,
+  loadWeHistory,
   loadWeLibrary,
   parseWorkshopTags,
   probePreviewMedia,
+  recordWeApply,
   saveWeLibrary,
   startPageCapability,
   subscribeItem,
@@ -82,11 +91,13 @@ export class WorkshopShop {
       query: '',
       sort: 'trending',
       tag: '',
+      type: '', // 壁纸类型：'' | Video | Scene | Web | Application
+      res: '', // 分辨率筛选：'' | '3840 x 2160' | ...
+      age: 'safe', // 内容分级：everyone（仅全年龄）| safe（排除成人，默认）| all
       page: 1,
       hasPrev: false,
       hasNext: false,
       loading: false,
-      excludeMature: true, // 默认排除成人内容（列表里那些打不开的占位卡）
     };
   }
 
@@ -108,18 +119,30 @@ export class WorkshopShop {
             <button class="ws-clear" type="button" data-role="ws-clear" title="清空" hidden>×</button>
             <button class="ws-go" type="button" data-role="ws-go">搜索</button>
           </div>
+          <button class="ws-chip" type="button" data-role="ws-history" title="应用过的壁纸">🕘 历史</button>
           <div class="ws-sorts" data-role="ws-sorts">
             ${WE_SORTS.map((sort) => `<button class="ws-chip" type="button" data-sort="${sort.value}">${sort.label}</button>`).join('')}
           </div>
           <button class="icon-btn ws-close" type="button" data-role="ws-close" title="关闭（Esc）" aria-label="关闭壁纸工坊">${icon('close')}</button>
         </header>
 
+        <nav class="ws-tags" data-role="ws-types">
+          <span class="ws-age-label">类型</span>
+          ${WE_TYPES.map((item) => `<button class="ws-chip" type="button" data-type="${item.value}">${item.label}</button>`).join('')}
+        </nav>
+
         <nav class="ws-tags" data-role="ws-tags">
           ${WE_TAGS.map((tag) => `<button class="ws-chip" type="button" data-tag="${tag.value}">${tag.label}</button>`).join('')}
+        </nav>
+
+        <nav class="ws-tags" data-role="ws-meta">
+          <span class="ws-age-label">分辨率</span>
+          <select class="ws-select" data-role="ws-res" aria-label="分辨率">
+            ${WE_RESOLUTIONS.map((item) => `<option value="${item.value}">${item.label}</option>`).join('')}
+          </select>
           <span class="ws-age-group">
             <span class="ws-age-label">内容分级</span>
-            <button class="ws-chip" type="button" data-age="exclude">排除成人</button>
-            <button class="ws-chip" type="button" data-age="all">全部</button>
+            ${WE_AGES.map((item) => `<button class="ws-chip" type="button" data-age="${item.value}">${item.label}</button>`).join('')}
           </span>
         </nav>
 
@@ -182,20 +205,37 @@ export class WorkshopShop {
       this.load(true);
     });
 
+    this.root.querySelector('[data-role="ws-types"]').addEventListener('click', (event) => {
+      const typeBtn = event.target.closest('[data-type]');
+      if (!typeBtn) return;
+      this.state.type = typeBtn.getAttribute('data-type');
+      this.syncChips();
+      this.load(true);
+    });
+
+    const resSelect = this.root.querySelector('[data-role="ws-res"]');
+    if (resSelect) {
+      resSelect.addEventListener('change', () => {
+        this.state.res = resSelect.value;
+        this.load(true);
+      });
+    }
+
+    // 分类 chips 挂在 ws-tags 容器里；内容分级在 ws-meta——两棵子树分开监听
     this.root.querySelector('[data-role="ws-tags"]').addEventListener('click', (event) => {
       const tagBtn = event.target.closest('[data-tag]');
-      if (tagBtn) {
-        this.state.tag = tagBtn.getAttribute('data-tag');
-        this.syncChips();
-        this.load(true);
-        return;
-      }
+      if (!tagBtn) return;
+      this.state.tag = tagBtn.getAttribute('data-tag');
+      this.syncChips();
+      this.load(true);
+    });
+
+    this.root.querySelector('[data-role="ws-meta"]').addEventListener('click', (event) => {
       const ageBtn = event.target.closest('[data-age]');
-      if (ageBtn) {
-        this.state.excludeMature = ageBtn.getAttribute('data-age') !== 'all';
-        this.syncChips();
-        this.load(true);
-      }
+      if (!ageBtn) return;
+      this.state.age = ageBtn.getAttribute('data-age');
+      this.syncChips();
+      this.load(true);
     });
 
     this.root.querySelector('[data-role="ws-prev"]').addEventListener('click', () => {
@@ -212,6 +252,9 @@ export class WorkshopShop {
     });
 
     this.root.querySelector('[data-role="ws-close"]').addEventListener('click', () => this.close());
+
+    const historyBtn = this.root.querySelector('[data-role="ws-history"]');
+    if (historyBtn) historyBtn.addEventListener('click', () => this.openHistory());
 
     const loginGo = this.root.querySelector('[data-role="ws-login-go"]');
     if (loginGo) {
@@ -242,20 +285,22 @@ export class WorkshopShop {
     }
   }
 
-  /** 高亮当前排序 / 分类 / 内容分级 chip。 */
+  /** 高亮当前排序 / 类型 / 分类 / 分级 chip，同步分辨率下拉。 */
   syncChips() {
     this.root.querySelectorAll('[data-sort]').forEach((button) => {
       button.setAttribute('data-active', button.getAttribute('data-sort') === this.state.sort ? 'true' : 'false');
+    });
+    this.root.querySelectorAll('[data-type]').forEach((button) => {
+      button.setAttribute('data-active', button.getAttribute('data-type') === this.state.type ? 'true' : 'false');
     });
     this.root.querySelectorAll('[data-tag]').forEach((button) => {
       button.setAttribute('data-active', button.getAttribute('data-tag') === this.state.tag ? 'true' : 'false');
     });
     this.root.querySelectorAll('[data-age]').forEach((button) => {
-      const active =
-        (this.state.excludeMature && button.getAttribute('data-age') === 'exclude') ||
-        (!this.state.excludeMature && button.getAttribute('data-age') === 'all');
-      button.setAttribute('data-active', active ? 'true' : 'false');
+      button.setAttribute('data-active', button.getAttribute('data-age') === this.state.age ? 'true' : 'false');
     });
+    const resSelect = this.root.querySelector('[data-role="ws-res"]');
+    if (resSelect) resSelect.value = this.state.res;
   }
 
   /* ------------------------------ 列表 ------------------------------ */
@@ -280,12 +325,16 @@ export class WorkshopShop {
     statusEl.hidden = false;
     statusEl.textContent = '正在从创意工坊加载…';
     try {
+      // 每次加载刷新一次云端配置：缩略图中转按它决定走云端还是 Steam 原图
+      this._cloudConfig = this.cloudConfig();
       const result = await browseWorkshop({
         query: this.state.query,
         sort: this.state.sort,
         tag: this.state.tag,
+        type: this.state.type,
+        res: this.state.res,
+        age: this.state.age,
         page: this.state.page,
-        excludeMature: this.state.excludeMature,
       });
       this.state.hasPrev = result.hasPrev;
       this.state.hasNext = result.hasNext;
@@ -416,13 +465,82 @@ export class WorkshopShop {
     card.dataset.id = item.id;
     card.title = `${item.title}（#${item.id}）`;
     card.innerHTML = `
-      <img class="ws-img" loading="lazy" alt="" referrerpolicy="no-referrer" />
+      <img class="ws-img" loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" />
       <span class="ws-info"><span class="ws-title"></span><span class="ws-sub">#${item.id}</span></span>
     `;
-    card.querySelector('.ws-img').src = item.preview;
+    const img = card.querySelector('.ws-img');
+    // 缩略图走云端中转（Steam 图床在国内单张十几秒，30 张串行能把列表拖成全黑）；
+    // 中转不可用（服务端没实现 / 云端未配置）时回退 Steam 原图
+    const thumb = cloudThumbUrl(this._cloudConfig, item.preview, 512);
+    if (thumb) {
+      let fellBack = false;
+      img.addEventListener('error', () => {
+        if (fellBack || !item.preview) return;
+        fellBack = true;
+        img.src = item.preview;
+      });
+      img.src = thumb;
+    } else {
+      img.src = item.preview;
+    }
     card.querySelector('.ws-title').textContent = item.title;
     card.addEventListener('click', () => this.openDetail(item));
     return card;
+  }
+
+  /* ------------------------------ 应用历史 ------------------------------ */
+
+  /** 应用历史面板：最近用过的壁纸，点击进详情可再次应用。 */
+  async openHistory() {
+    const wrap = document.createElement('div');
+    const list = await loadWeHistory();
+    wrap.className = 'ws-hist';
+    if (!list.length) {
+      wrap.innerHTML = '<div class="ws-status">还没有应用过壁纸——挑一张「设为起始页背景」后就会出现在这里</div>';
+    } else {
+      wrap.innerHTML = `
+        <div class="ws-grid ws-hist-grid">
+          ${list
+            .map(
+              (entry) => `
+            <button class="ws-card" type="button" data-id="${entry.id}">
+              <img class="ws-img" loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" />
+              <span class="ws-info"><span class="ws-title"></span><span class="ws-sub"></span></span>
+            </button>`,
+            )
+            .join('')}
+        </div>
+        <div class="ws-status">按最近应用排序 · 点击卡片查看详情并再次应用</div>
+      `;
+      const buttons = wrap.querySelectorAll('.ws-card');
+      list.forEach((entry, index) => {
+        const card = buttons[index];
+        const img = card.querySelector('.ws-img');
+        const thumb = cloudThumbUrl(this._cloudConfig || this.cloudConfig(), entry.preview, 512);
+        if (thumb) {
+          let fellBack = false;
+          img.addEventListener('error', () => {
+            if (fellBack || !entry.preview) return;
+            fellBack = true;
+            img.src = entry.preview;
+          });
+          img.src = thumb;
+        } else if (entry.preview) {
+          img.src = entry.preview;
+        }
+        card.querySelector('.ws-title').textContent = entry.title || `#${entry.id}`;
+        card.querySelector('.ws-sub').textContent = new Date(entry.at).toLocaleString('zh-CN', {
+          month: 'numeric',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        card.addEventListener('click', () => this.openDetail(entry));
+      });
+    }
+
+    const handle = openModal({ title: '应用历史', content: wrap });
+    handle.el.style.width = 'min(920px, 94vw)';
   }
 
   /* ------------------------------ 详情 ------------------------------ */
@@ -572,9 +690,31 @@ export class WorkshopShop {
         // 预览素材优先级：云端直链（作者原图 / 完整视频）> 本地 WE 目录 > Steam 原件
         const full = (assets && assets.image) || item.preview;
         const cloud = this.cloudConfig();
-        const cloudProbe = cloud
+        let cloudProbe = cloud
           ? await this.queryCloud(item.id, cloud)
           : { record: null, failed: false };
+        // 未缓存的条目首次查询是「下载中」——就地轮询等它就绪（首次触发下载
+        // 是云端的标准流程），就绪后能力文案与预览自动升级，不用用户重开详情
+        if (
+          cloud &&
+          cloudProbe.record &&
+          ['downloading', 'queued'].includes(cloudProbe.record.state)
+        ) {
+          const pendingEl = media.querySelector('[data-role="ws-cloud"]');
+          if (pendingEl && !pendingEl.hidden) {
+            const label = pendingEl.querySelector('span');
+            if (label) label.textContent = '云端正在下载壁纸素材，就绪后原图/动态画面会自动升级…';
+          }
+          const finalRecord = await waitCloudReady(cloud, item.id, {
+            timeout: 90000,
+            interval: 4000,
+            shouldContinue: () => document.body.contains(media),
+          });
+          if (!document.body.contains(media)) return;
+          if (finalRecord && finalRecord.state === 'ready') {
+            cloudProbe = { record: finalRecord, failed: false };
+          }
+        }
         const cloudRecord = cloudProbe.record;
         if (!document.body.contains(media)) return;
         const cloudReady = Boolean(cloudRecord && cloudRecord.state === 'ready');
@@ -656,6 +796,20 @@ export class WorkshopShop {
         if (cloudVideoEl) img.replaceWith(cloudVideoEl);
         else if (source) img.src = source;
 
+        // 网页壁纸：云端 serve 了项目目录时，详情里直接实时运行（与起始页同一套沙箱）
+        if (!cloudVideoEl && profile.kind === 'web' && cloudReady && cloudRecord.web && cloud) {
+          const frame = document.createElement('iframe');
+          frame.className = 'ws-detail-img ws-web-frame';
+          frame.title = '网页壁纸实时预览';
+          frame.src = cloudAssetUrl(cloud, item.id, 'web');
+          frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-pointer-lock');
+          frame.setAttribute('scrolling', 'no');
+          frame.style.border = '0';
+          frame.style.background = '#000';
+          img.replaceWith(frame);
+          captionEl.textContent = '网页壁纸实时运行中（鼠标可交互）';
+        }
+
         // 起始页效果：按当前显示方式先模拟一遍，方形素材铺到屏幕上到底什么样
         const spImg = media.querySelector('.ws-sp-img');
         const spBg = media.querySelector('.ws-sp-bg');
@@ -678,11 +832,14 @@ export class WorkshopShop {
             mediaRatio = probe.width / probe.height;
           }
           const ratioGap = Math.abs(mediaRatio - screenRatio) / screenRatio;
-          const useContain = weFit === 'contain' || ratioGap > 0.15;
+          // 与背景引擎同一套判定：显示方式完全由用户设置决定
+          const useContain = weFit === 'contain';
           spCanvas.classList.toggle('is-contain', useContain);
           spNote.textContent = useContain
             ? '起始页效果：完整显示 + 同图虚化铺底'
-            : '起始页效果：铺满屏幕（两侧会被裁切）';
+            : ratioGap > 0.15
+              ? '起始页效果：铺满屏幕（方形图会裁掉较多上下边缘，想看全图改「完整显示」）'
+              : '起始页效果：铺满屏幕（两侧会被裁切）';
         }
       })
       .catch(() => {
@@ -709,6 +866,34 @@ export class WorkshopShop {
           closeOnClick: false,
           onClick: async () => {
             await this.subscribeApply(item);
+            return false;
+          },
+        },
+        {
+          label: '应用到桌面（免 Steam 静态）',
+          kind: 'ghost',
+          closeOnClick: false,
+          onClick: async () => {
+            try {
+              await this.sendToDesktopTool(item);
+            } catch (err) {
+              if (err && err.name === 'AbortError') return false;
+              this.onToast(`发送失败：${describeError(err)}`, 'error');
+            }
+            return false;
+          },
+        },
+        {
+          label: '安装到 Lively 桌面',
+          kind: 'ghost',
+          closeOnClick: false,
+          onClick: async () => {
+            try {
+              await this.installToLively(item);
+            } catch (err) {
+              if (err && err.name === 'AbortError') return false;
+              this.onToast(`安装失败：${describeError(err)}`, 'error');
+            }
             return false;
           },
         },
@@ -775,7 +960,10 @@ export class WorkshopShop {
       return;
     }
     const delay = Math.min(300, Math.max(5, Number(bg.weApplyDelay) || 20));
-    this.onToast(`将在 ${delay} 秒后自动应用到桌面（等 Steam 下载完成）`, 'ok');
+    this.onToast(
+      `将在 ${delay} 秒后自动应用到桌面（等 Steam 下载完成）。若桌面没换：检查 设置 → WE 工坊 → Workshop 内容目录 是否为本机 Steam 库路径（如 D:\\SteamLibrary\\steamapps\\workshop\\content\\431960）`,
+      'ok',
+    );
     window.setTimeout(() => this.fireSteamApply(item.id, bg.weWorkshopPath), delay * 1000);
   }
 
@@ -844,6 +1032,8 @@ export class WorkshopShop {
 
   /** 把云端素材写进背景设置（背景引擎会优先用云端直链，不占本地磁盘）。 */
   async applyCloudSettings(item, record) {
+    // 应用动作立即进历史（背景引擎那侧也会记，去重逻辑保证只留一条）
+    recordWeApply({ id: item.id, title: item.title, preview: item.preview || '' });
     await this.app.updateSettings({
       background: {
         type: 'we',
@@ -853,6 +1043,8 @@ export class WorkshopShop {
         // 云端就绪标记：背景引擎据此走直链；同时留一张 Steam 缩略图做兜底
         weCloudItemId: item.id,
         weCloudVideo: Boolean(record && record.video),
+        // 网页壁纸：背景引擎会用沙箱 iframe 真实运行
+        weCloudWeb: Boolean(record && record.web),
         weImage: item.preview || '',
         weVideo: '',
         weLocalMediaId: '',
@@ -882,6 +1074,7 @@ export class WorkshopShop {
         weLocalMediaId: (local && local.mediaId) || '',
         weCloudItemId: '',
         weCloudVideo: false,
+        weCloudWeb: false,
       },
     });
     if (local) {
@@ -892,6 +1085,137 @@ export class WorkshopShop {
         'ok',
       );
     }
+  }
+
+  /**
+   * 应用到桌面（免 Steam 静态）：把云端原图写进交接文件夹，
+   * 配套的 aurora-desktop-wallpaper 小工具以 --watch 模式监视并自动应用。
+   * 适合没有 Steam / Wallpaper Engine 的办公电脑。
+   */
+  async sendToDesktopTool(item) {
+    if (typeof window.showDirectoryPicker !== 'function') {
+      throw new Error('当前浏览器不支持选择文件夹（需要较新的 Chrome/Edge）');
+    }
+    let dir = await getHandoffDir();
+    if (!dir) {
+      dir = await window.showDirectoryPicker({ id: 'aurora-handoff', mode: 'readwrite' });
+      await saveHandoffDir(dir);
+      this.onToast('交接文件夹已记住，以后发送不再选择', 'ok');
+    } else if ((await dir.queryPermission({ mode: 'readwrite' })) !== 'granted') {
+      if ((await dir.requestPermission({ mode: 'readwrite' })) !== 'granted') {
+        throw new Error('文件夹权限被拒绝，请重新选择');
+      }
+    }
+
+    this.onToast('正在获取云端原图…', 'ok');
+    const [assets, details] = await Promise.all([
+      fetchPreviewAssets(item.id).catch(() => null),
+      fetchDetails([item.id]).catch(() => []),
+    ]);
+    const url = (assets && assets.image) || (details[0] && details[0].preview_url) || item.preview || '';
+    if (!url) throw new Error('这张壁纸没有可用的静态原图');
+
+    const response = await fetch(url, { credentials: 'omit' });
+    if (!response.ok) throw new Error(`原图下载失败（HTTP ${response.status}）`);
+    const blob = await response.blob();
+    if (!blob.size) throw new Error('原图下载为空');
+
+    const ext = String(blob.type).includes('png') ? 'png' : 'jpg';
+    const name = `aurora-wallpaper-${item.id}-${Date.now()}.${ext}`;
+    const sent = await writeHandoffFile(name, blob);
+    if (!sent) throw new Error('写入交接文件夹失败（权限或磁盘问题）');
+    this.onToast(
+      `已发送「${item.title}」→ 交接文件夹，桌面工具监视模式会自动应用`,
+      'ok',
+    );
+  }
+
+  /**
+   * 安装到 Lively Wallpaper（免费开源动态桌面，无需 Steam）：
+   * 网页类 → 整包目录树（index.html 入口）；视频类 → 单个 mp4；
+   * 其他 → 原图。写进 Lively 的库目录后，打开 Lively 就能看到并应用。
+   */
+  async installToLively(item) {
+    if (typeof window.showDirectoryPicker !== 'function') {
+      throw new Error('当前浏览器不支持选择文件夹（需要较新的 Chrome/Edge）');
+    }
+    let dir = await getLivelyDir();
+    if (!dir) {
+      dir = await window.showDirectoryPicker({
+        id: 'aurora-lively',
+        mode: 'readwrite',
+        startIn: 'documents',
+      });
+      await saveLivelyDir(dir);
+      this.onToast('Lively 库目录已记住（建议选 %USERPROFILE%\\LivelyProjects）', 'ok');
+    } else if ((await dir.queryPermission({ mode: 'readwrite' })) !== 'granted') {
+      if ((await dir.requestPermission({ mode: 'readwrite' })) !== 'granted') {
+        throw new Error('文件夹权限被拒绝，请重新选择');
+      }
+    }
+
+    const safeTitle =
+      String(item.title || '')
+        .replace(/[\\/:*?"<>|]/g, '')
+        .trim()
+        .slice(0, 40) || `aurora-${item.id}`;
+    const folderName = `aurora-${item.id}-${safeTitle}`;
+
+    const cloud = this.cloudConfig();
+    if (!cloud) throw new Error('Lively 联动需要云端服务：请先在设置里配置服务地址和 Token');
+    const probe = await this.queryCloud(item.id, cloud).catch(() => null);
+    const record = probe && probe.record;
+
+    // 网页壁纸：整包目录树
+    if (record && record.state === 'ready' && record.web) {
+      const files = await fetchWebFileList(cloud, item.id);
+      if (!files.length) throw new Error('云端未返回文件清单（需要 /web/files 端点）');
+      this.onToast(`开始安装网页壁纸包（${files.length} 个文件）…`, 'ok');
+      let done = 0;
+      const queue = files.slice();
+      const worker = async () => {
+        while (queue.length) {
+          const rel = queue.shift();
+          try {
+            const res = await fetch(webAssetUrl(cloud, item.id, rel), { credentials: 'omit' });
+            if (res.ok) await writeDirFile(dir, `${folderName}/${rel}`, await res.blob());
+          } catch (err) {
+            /* 单文件失败跳过 */
+          }
+          done += 1;
+          if (done % 25 === 0) this.onToast(`安装进度 ${done}/${files.length}…`, 'ok');
+        }
+      };
+      await Promise.all(Array.from({ length: 4 }, worker));
+      this.onToast(
+        `已安装到 Lively（${done}/${files.length} 个文件）：打开 Lively 选择「${folderName}」即可`,
+        'ok',
+      );
+      return;
+    }
+
+    // 视频壁纸：单个 mp4
+    if (record && record.state === 'ready' && record.video) {
+      const res = await fetch(cloudAssetUrl(cloud, item.id, 'video'), { credentials: 'omit' });
+      if (!res.ok) throw new Error(`视频下载失败（HTTP ${res.status}）`);
+      await writeDirFile(dir, `${folderName}/video.mp4`, await res.blob());
+      this.onToast(`已安装到 Lively：打开 Lively 选择「${folderName}」即可`, 'ok');
+      return;
+    }
+
+    // 其他：静态原图
+    const [assets, details] = await Promise.all([
+      fetchPreviewAssets(item.id).catch(() => null),
+      fetchDetails([item.id]).catch(() => []),
+    ]);
+    const url = (assets && assets.image) || (details[0] && details[0].preview_url) || item.preview || '';
+    if (!url) throw new Error('这张壁纸没有可用的静态原图');
+    const res = await fetch(url, { credentials: 'omit' });
+    if (!res.ok) throw new Error(`原图下载失败（HTTP ${res.status}）`);
+    const blob = await res.blob();
+    const ext = String(blob.type).includes('png') ? 'png' : 'jpg';
+    await writeDirFile(dir, `${folderName}/image.${ext}`, blob);
+    this.onToast(`已安装到 Lively（静态）：打开 Lively 选择「${folderName}」即可`, 'ok');
   }
 
   /** 加入每日轮换收藏池（去重）。 */

@@ -13,7 +13,9 @@
 
 import { STORAGE_KEYS } from './defaults.js';
 import { getRaw, setRaw } from './storage.js';
-import { cloudAssetUrl, cloudIsCoolingDown, fetchCloudWallpaper } from './we-cloud.js';
+import { cloudAssetUrl, cloudIsCoolingDown, fetchCloudWallpaper,
+  fetchCloudWallpaperCached,
+} from './we-cloud.js';
 
 export const WE_APPID = 431960;
 
@@ -25,25 +27,65 @@ export const WE_SORTS = [
   { value: 'trending', label: '热门' },
   { value: 'recent', label: '最新' },
   { value: 'subscribed', label: '最多订阅' },
+  { value: 'toprated', label: '最高评价' },
 ];
 
-/** 分类标签（UI 中文 → Steam 工坊英文 tag）。 */
+/** 类型标签（Wallpaper Engine 的四种壁纸类型，也是工坊 tag）。 */
+export const WE_TYPES = [
+  { value: '', label: '全部类型' },
+  { value: 'Video', label: '视频' },
+  { value: 'Scene', label: '3D 场景' },
+  { value: 'Web', label: '网页' },
+  { value: 'Application', label: '应用' },
+];
+
+/** 内容分级三档（对应工坊的 Everyone/Questionable/Mature 标签语义）。 */
+export const WE_AGES = [
+  { value: 'everyone', label: '仅全年龄' },
+  { value: 'safe', label: '排除成人' },
+  { value: 'all', label: '全部' },
+];
+
+/** 分辨率筛选（工坊的分辨率 tag 是"宽 x 高"原文，含 Ultrawide 系列）。 */
+export const WE_RESOLUTIONS = [
+  { value: '', label: '不限分辨率' },
+  { value: '1920 x 1080', label: '1080p' },
+  { value: '2560 x 1440', label: '2K' },
+  { value: '3840 x 2160', label: '4K' },
+  { value: 'Ultrawide 2560 x 1080', label: '带鱼屏 21:9' },
+];
+
+/** 分类标签（UI 中文 → Steam 工坊英文 tag，对齐 WE 内置浏览器的风格分类）。 */
 export const WE_TAGS = [
   { value: '', label: '全部分类' },
   { value: 'Anime', label: '动漫' },
-  { value: 'Cyberpunk', label: '赛博朋克' },
+  { value: 'Girls', label: '少女' },
+  { value: 'Aesthetic', label: '唯美' },
   { value: 'Nature', label: '自然风景' },
+  { value: 'Landscape', label: '山水景观' },
+  { value: 'Cityscape', label: '城市' },
+  { value: 'Space', label: '太空' },
   { value: 'Sci-Fi', label: '科幻' },
+  { value: 'Cyberpunk', label: '赛博朋克' },
+  { value: 'Fantasy', label: '幻想' },
   { value: 'Game', label: '游戏' },
   { value: 'Abstract', label: '抽象' },
-  { value: 'Aesthetic', label: '唯美' },
-  { value: 'Fantasy', label: '幻想' },
-  { value: 'Space', label: '太空' },
-  { value: 'Cityscape', label: '城市' },
   { value: 'Animal', label: '动物' },
-  { value: 'Girls', label: '少女' },
+  { value: 'Cat', label: '猫' },
+  { value: 'Dog', label: '狗' },
+  { value: 'Cartoon', label: '卡通' },
+  { value: 'Dark', label: '暗黑' },
+  { value: 'Gothic', label: '哥特' },
+  { value: 'Horror', label: '惊悚' },
   { value: 'Machinery', label: '机械' },
+  { value: 'Vehicle', label: '载具' },
+  { value: 'Weapon', label: '武器' },
+  { value: 'Music', label: '音乐' },
+  { value: 'Sports', label: '运动' },
   { value: 'Pixel', label: '像素' },
+  { value: 'Retro', label: '复古' },
+  { value: 'Minimal', label: '极简' },
+  { value: 'Meditation', label: '冥想放松' },
 ];
 
 /** 是否处于扩展环境（非扩展预览时订阅/cookie 不可用，仅浏览可用）。 */
@@ -175,11 +217,30 @@ export function startPageCapability(profile, cloud) {
     ? `${cloud.preview.width}×${cloud.preview.height}`
     : '';
 
-  if (kind === 'web' || kind === 'application') {
+  if (kind === 'web') {
+    // 网页壁纸本体就是 HTML/JS：云端把项目目录 serve 出来后，起始页用沙箱 iframe
+    // 真实运行它（鼠标交互可用）；WE 注入的 JS API（音频响应等）没有，相关特性降级
+    if (cloudReady && cloud.web) {
+      const missing = ((profile && profile.features) || []).filter((f) => /audio/i.test(f));
+      return {
+        level: 'full',
+        title: '可在起始页真实运行',
+        detail: `网页壁纸会在起始页的沙箱里直接运行，鼠标交互可用${
+          missing.length ? `；${missing.join('、')}依赖 Wallpaper Engine 音频接口，起始页里不生效` : ''
+        }。`,
+      };
+    }
+    return {
+      level: 'none',
+      title: '暂无法在起始页运行',
+      detail: '网页壁纸需要云端提供项目文件后才能在起始页运行（当前云端连接失败或未提供网页素材），先显示预览图。',
+    };
+  }
+  if (kind === 'application') {
     return {
       level: 'none',
       title: '无法在起始页展示',
-      detail: '这类壁纸依赖 Wallpaper Engine 运行时，起始页只能显示它的预览图，壁纸本身不会运行。',
+      detail: '应用壁纸是本机程序，只能在 Wallpaper Engine 中运行，起始页只显示它的预览图。',
     };
   }
   if (kind === 'video') {
@@ -204,6 +265,15 @@ export function startPageCapability(profile, cloud) {
     };
   }
   if (kind === 'scene') {
+    // 场景类作者上传时 WE 编辑器会自动生成官方渲染的预览视频；
+    // 云端把它提取出来后，起始页循环播放——动态效果与 WE 里一致，只是没有实时交互
+    if (cloudVideo) {
+      return {
+        level: 'full',
+        title: '可播放官方预览视频',
+        detail: '3D 场景本体需 Wallpaper Engine 实时渲染；起始页播放的是云端提取的官方渲染录屏，动态效果一致，无实时交互与自定义。',
+      };
+    }
     if (cloudPreview) {
       return {
         level: 'preview',
@@ -319,7 +389,7 @@ function dayOfYear() {
 
 /**
  * 浏览创意工坊列表（与 Steam 官网浏览页一致，含总数）。
- * @param {{query?:string, sort?:'trending'|'recent'|'subscribed', tag?:string, page?:number, excludeMature?:boolean}} options
+ * @param {{query?:string, sort?:string, tag?:string, type?:string, res?:string, age?:string, page?:number}} options
  * @returns {Promise<{items:Array<{id:string,title:string,preview:string}>, hasPrev:boolean, hasNext:boolean, total:number|null}>}
  */
 export async function browseWorkshop(options = {}) {
@@ -327,7 +397,15 @@ export async function browseWorkshop(options = {}) {
 }
 
 /** 方式一：解析 workshop browse 网页。 */
-async function browseViaWeb({ query = '', sort = 'trending', tag = '', page = 1, excludeMature = true } = {}) {
+async function browseViaWeb({
+  query = '',
+  sort = 'trending',
+  tag = '',
+  type = '',
+  res = '',
+  age = 'safe',
+  page = 1,
+} = {}) {
   const params = new URLSearchParams({
     appid: String(WE_APPID),
     numperpage: '30',
@@ -337,12 +415,21 @@ async function browseViaWeb({ query = '', sort = 'trending', tag = '', page = 1,
     params.set('browsesort', 'textsearch');
     params.set('searchtext', query.trim());
   } else {
-    const sorts = { trending: 'trendingscore', recent: 'mostrecent', subscribed: 'totaluniquesubscribers' };
+    const sorts = {
+      trending: 'trendingscore',
+      recent: 'mostrecent',
+      subscribed: 'totaluniquesubscribers',
+      toprated: 'totalevaluations',
+    };
     params.set('browsesort', sorts[sort] || 'trendingscore');
   }
-  if (tag) params.set('requiredtags[0]', tag);
-  // 年龄过滤：排除 Mature 标签后，列表里不再出现打不开的成人内容占位卡
-  if (excludeMature) params.set('excludedtags[0]', 'Mature');
+  // requiredtags 之间是 AND 语义；类型/分类/分辨率/分级都是条目上的单值 tag，
+  // 同时指定不会互斥，正对应 WE 内置浏览器的多条件过滤
+  const required = [type, tag, res].filter(Boolean);
+  if (age === 'everyone') required.push('Everyone');
+  required.forEach((value, index) => params.set(`requiredtags[${index}]`, value));
+  // 排除成人：列表里不再出现打不开的成人内容占位卡
+  if (age === 'safe') params.set('excludedtags[0]', 'Mature');
 
   // 带 Steam 会话：登录后列表与官网所见一致（含成人内容偏好与语言偏好）；
   // 未登录时没有登录 cookie，效果与匿名一致
@@ -577,6 +664,30 @@ export async function saveWeLibrary(items) {
  * @returns {Promise<{image:string, video:string|null, item:object}>}
  *   video 有值时优先用动态视频作起始页背景，失败自然降级到 image（由调用方处理）。
  */
+/**
+ * 记录一条应用历史（最近 50 条，同一张只保留最新时间）。失败静默——
+ * 历史是锦上添花，绝不能影响背景展示。
+ * @param {{id:string, title:string, preview:string}} item
+ */
+export async function recordWeApply(item) {
+  try {
+    if (!item || !item.id) return;
+    const record = await getRaw(STORAGE_KEYS.weHistory).catch(() => null);
+    const list = record && Array.isArray(record.items) ? record.items : [];
+    const entry = { id: String(item.id), title: item.title || '', preview: item.preview || '', at: Date.now() };
+    const next = [entry, ...list.filter((row) => row.id !== entry.id)].slice(0, 50);
+    await setRaw(STORAGE_KEYS.weHistory, { items: next });
+  } catch (err) {
+    /* 历史写失败无所谓 */
+  }
+}
+
+/** 读取应用历史（新的在前）。 */
+export async function loadWeHistory() {
+  const record = await getRaw(STORAGE_KEYS.weHistory).catch(() => null);
+  return record && Array.isArray(record.items) ? record.items : [];
+}
+
 export async function resolveWeBackground(bg, cloud) {
   const mode = bg.weMode === 'daily' ? 'daily' : 'fixed';
 
@@ -586,6 +697,28 @@ export async function resolveWeBackground(bg, cloud) {
     const video = String(bg.weVideo || '').trim();
     const item = { id: String(bg.weItemId || ''), title: String(bg.weTitle || '') };
     if (!image && !video) throw new Error('尚未选择工坊壁纸');
+
+    // 云端自动升级：早年/云端未就绪时应用的固定壁纸，本地只存了 Steam 的方形
+    // 预览图（真正的宽幅内容在视频本体里）。每次打开新标签查一次云端，
+    // 就绪即无缝切换到原片，用户无需重新应用。
+    if (cloud && cloud.url && item.id && !cloudIsCoolingDown()) {
+      try {
+        const record = await fetchCloudWallpaperCached(cloud, item.id);
+        if (record && record.state === 'ready') {
+          recordWeApply({ id: item.id, title: item.title, preview: item.preview || image });
+          return {
+            image: cloudAssetUrl(cloud, item.id, 'preview'),
+            video: record.video ? cloudAssetUrl(cloud, item.id, 'video') : '',
+            webUrl: record.web ? cloudAssetUrl(cloud, item.id, 'web') : '',
+            item: { ...item, cloud: true },
+          };
+        }
+      } catch (err) {
+        /* 云端不可用就继续用本地存的素材 */
+      }
+    }
+
+    recordWeApply({ id: item.id, title: item.title, preview: image || item.preview });
     return { image, video: video || null, item };
   }
 
@@ -601,11 +734,14 @@ export async function resolveWeBackground(bg, cloud) {
   // 也顺带解决「Steam 拿不到就整个失败」的问题——权重比预览清晰度更关键。
   if (cloud && cloud.url && !cloudIsCoolingDown()) {
     try {
-      const record = await fetchCloudWallpaper(cloud, item.id, { timeout: 8000 });
+      const record = await fetchCloudWallpaperCached(cloud, item.id);
       if (record && record.state === 'ready') {
+        recordWeApply({ id: item.id, title: item.title, preview: item.preview });
         return {
           image: cloudAssetUrl(cloud, item.id, 'preview'),
           video: record.video ? cloudAssetUrl(cloud, item.id, 'video') : '',
+          // 网页壁纸：云端 serve 项目目录时给 iframe 入口，每日轮换也能真实运行
+          webUrl: record.web ? cloudAssetUrl(cloud, item.id, 'web') : '',
           item: { ...item, cloud: true },
         };
       }
@@ -635,5 +771,6 @@ export async function resolveWeBackground(bg, cloud) {
     video: '',
   }).catch(() => false);
   if (!image && !video) throw new Error('工坊壁纸信息获取失败（网络或代理问题）');
+  recordWeApply({ id: item.id, title: item.title, preview: item.preview });
   return { image: stripSteamImageParams(image), video, item };
 }

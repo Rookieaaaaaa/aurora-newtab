@@ -310,6 +310,10 @@ export const STORAGE_KEYS = {
   wallhavenLast: 'wallhavenLast',
   weLibrary: 'weLibrary', // WE 工坊：每日轮换收藏池
   weCache: 'weCache', // WE 工坊：当日轮换结果缓存
+  weHistory: 'weHistory', // WE 工坊：应用历史（最近 50 条）
+  weAssetCache: 'weAssetCache', // WE 工坊：本地资产缓存索引（LRU 5 张壁纸的图/视频）
+  weWebPrefetch: 'weWebPrefetch', // WE 工坊：网页壁纸整包预取进度与文件台账
+  weCloudMeta: 'weCloudMeta', // WE 工坊：云端元数据 TTL 缓存（避免每次开新标签都查接口）
 };
 
 /** Bing 壁纸接口。 */

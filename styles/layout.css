@@ -850,3 +850,12 @@ body.menu-open .stage {
     transform: none;
   }
 }
+
+/* WE 网页壁纸:沙箱 iframe 直接运行壁纸本体 */
+iframe.we-web-frame {
+  object-fit: none;
+  transform: none;
+  filter: none;
+  border: 0;
+  background: #000;
+}

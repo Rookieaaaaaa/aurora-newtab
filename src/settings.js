@@ -38,6 +38,12 @@ import {
 } from './we-cloud.js';
 import { fetchWallhavenList } from './wallhaven.js';
 import {
+  clearWeCacheDirHandle,
+  getWeCacheDirState,
+  reauthorizeWeCacheDir,
+  setWeCacheDirHandle,
+} from './we-cache.js';
+import {
   getSteamSession,
 } from './weworkshop.js';
 
@@ -250,7 +256,15 @@ export class SettingsDrawer {
                 <option value="cover">尽量填满（比例差距大时自动改为完整显示）</option>
                 <option value="contain">完整显示（不裁切，四周用同图虚化铺底填满）</option>
               </select>
-              <div class="hint">工坊预览多为方形件（约 1024px）：直接铺满会裁掉大半且发糊，所以比例差距大时会自动按「完整显示 + 虚化铺底」呈现，画面不裁切、也不放大。</div>
+              <div class="hint">显示方式完全由这里决定，不再自动切换。方形预览图直接铺满会裁掉大半且发糊——想看全图选「完整显示」；云端原片视频是宽幅的，两种方式都铺满。</div>
+            </div>
+            <div class="field">
+              <label>本地缓存位置（最近 5 张壁纸的图片 / 视频本体）</label>
+              <div class="btn-row">
+                <button class="btn ghost sm" type="button" data-role="we-cache-dir-btn">选择缓存文件夹</button>
+                <button class="btn ghost sm" type="button" data-role="we-cache-dir-clear" hidden>恢复浏览器默认</button>
+              </div>
+              <div class="hint" data-role="we-cache-dir-state">未设置：缓存放浏览器内置存储（IndexedDB），无法自选磁盘位置。</div>
             </div>
             <button class="btn ghost sm" type="button" data-role="we-browse">${icon('image')}浏览创意工坊，挑壁纸 / 订阅 / 设背景</button>
             <div class="row">
@@ -798,6 +812,51 @@ export class SettingsDrawer {
 
     const weBrowseBtn = this.root.querySelector('[data-role="we-browse"]');
     if (weBrowseBtn) weBrowseBtn.addEventListener('click', () => this.weShop.open());
+
+    // 本地缓存文件夹：选一次即可，资产落成真实文件；权限失效时点击重新授权
+    const dirBtn = this.root.querySelector('[data-role="we-cache-dir-btn"]');
+    const dirClear = this.root.querySelector('[data-role="we-cache-dir-clear"]');
+    const dirState = this.root.querySelector('[data-role="we-cache-dir-state"]');
+    if (dirBtn && dirClear && dirState) {
+      const refreshDirState = async () => {
+        const state = await getWeCacheDirState();
+        dirClear.hidden = !state.configured;
+        dirState.textContent = !state.configured
+          ? '未设置：缓存放浏览器内置存储（IndexedDB），无法自选磁盘位置。'
+          : state.usable
+            ? `已选择：${state.name}（图片/视频以真实文件存放在这个文件夹，淘汰时自动删除）`
+            : `已选择：${state.name}，但权限需要重新确认——再点一次「选择缓存文件夹」授权`;
+      };
+      dirBtn.addEventListener('click', async () => {
+        try {
+          if (typeof window.showDirectoryPicker !== 'function') {
+            toast('当前浏览器不支持选择文件夹（需要较新的 Chrome/Edge）', 'error');
+            return;
+          }
+          const state = await getWeCacheDirState();
+          if (state.configured && !state.usable && (await reauthorizeWeCacheDir())) {
+            toast('缓存文件夹已重新授权', 'ok');
+          } else {
+            const handle = await window.showDirectoryPicker({
+              id: 'aurora-we-cache',
+              mode: 'readwrite',
+            });
+            await setWeCacheDirHandle(handle);
+            toast('缓存文件夹已设置，之后的壁纸资产会存到这里', 'ok');
+          }
+        } catch (err) {
+          if (err && err.name === 'AbortError') return; // 用户取消不算错
+          toast(`设置失败：${describeError(err)}`, 'error');
+        }
+        await refreshDirState();
+      });
+      dirClear.addEventListener('click', async () => {
+        await clearWeCacheDirHandle();
+        toast('已恢复浏览器默认存储（已存文件仍在原文件夹，可手动清理）', 'ok');
+        await refreshDirState();
+      });
+      refreshDirState();
+    }
 
     const weLocalScan = this.root.querySelector('[data-role="we-local-scan"]');
     if (weLocalScan) weLocalScan.addEventListener('click', () => this.scanLocalWeLibrary(weLocalScan));
