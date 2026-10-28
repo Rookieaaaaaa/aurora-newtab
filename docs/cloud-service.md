@@ -18,10 +18,12 @@
 
 1. 扩展发一个壁纸 ID，服务能在若干秒内返回该壁纸的**原图**与**元数据**；
 2. 若该壁纸含视频，能通过 HTTP **流式播放**（支持 Range，不整文件读进内存）；
-3. 磁盘缓存可控：设上限，超了按 LRU 自动清理；
-4. 接口简单、鉴权轻量、可一键部署（Docker Compose）。
+3. 网页类壁纸能把整包文件按清单 serve 出来，让 `<iframe>` 真实运行；
+4. 列表缩略图能由云端代拉 Steam 图并缩放返回（治国内 CDN 慢）；
+5. 磁盘缓存可控：设上限，超了按 LRU 自动清理；
+6. 接口简单、鉴权轻量、可一键部署（Docker Compose）。
 
-**非目标**：不做壁纸搜索/推荐（搜索仍由扩展直接访问 Steam）；不做转码；不做多用户体系。
+**非目标**：不做壁纸搜索/推荐（搜索仍由扩展直接访问 Steam）；不做视频转码（图片缩略图缩放除外）；不做多用户体系。
 
 ---
 
@@ -33,13 +35,20 @@ Chrome 扩展  ──HTTP──▶  云端服务 (FastAPI)  ──spawn──▶
                               │◀──── 下载到磁盘 ───────────┘
                               ▼
                     /data/workshop/431960/<id>/
-                        preview.jpg
-                        project.json
-                        <视频>.mp4
+                        preview.jpg        → /api/wallpaper/<id>/preview.jpg
+                        project.json       → /api/wallpaper/<id>
+                        <视频>.mp4         → /api/wallpaper/<id>/video.mp4
+                        index.html + 资源  → /api/wallpaper/<id>/web/<path>
+                                             /api/wallpaper/<id>/web/files
+
+                 另有两条不落工坊目录的辅助路由：
+                   /api/thumb?u=&w=   → 代拉 Steam 图片并缩放（不写盘，仅内存+CDN 缓存）
+                   /api/library       → 已缓存清单
 ```
 
 - 服务收到某 ID 的首次请求 → 触发下载 → 就绪后返回素材
 - 已下载过的直接读磁盘，秒回
+- `<id>/` 里有什么就 serve 什么：静态看 `preview.jpg`，视频看 `*.mp4`，网页壁纸整包交给 iframe
 
 ---
 
@@ -142,6 +151,43 @@ steamcmd \
 - 用流式响应（`StreamingResponse` / `sendfile`），**禁止把整个文件读进内存**
 - 无视频时返回 404 + JSON 错误
 
+#### `GET /api/wallpaper/{id}/web/files`
+网页壁纸（`type: "web"`）的文件清单。扩展拿到后把整包拉进浏览器 HTTP 缓存，之后 iframe 的子资源请求全部命中本地磁盘、不再产生服务器流量。
+
+```json
+{ "id": "3824243049", "files": ["index.html", "app.js", "css/style.css", "media/bg.webm"], "total": 4 }
+```
+
+**要求**
+
+- 递归遍历 `<CACHE_DIR>/431960/<id>/` 下的真实文件，**排除** `preview.jpg`、`project.json`、`scene.pkg`、`*.mp4`（这些各有专门端点）
+- 返回**包内相对路径**，统一用 `/` 分隔，不要带前导 `/`
+- 入口固定是根目录的 `index.html`（扩展按 `web/index.html` 直接引用）
+- 非网页壁纸（scene / video）返回 `files: []` 或 404 都行，扩展会记成 unsupported 不再重试
+
+#### `GET /api/wallpaper/{id}/web/<path>`
+网页壁纸包内的任意文件，直接 serve。
+
+| 项 | 要求 |
+|---|---|
+| Content-Type | **按扩展名正确推断**。`index.html` 必须是 `text/html`——扩展靠这个判断入口能不能跑（拿到别的类型会放弃 iframe，回落到图片） |
+| 缓存 | `Cache-Control: public, max-age=604800, immutable`——扩展就是靠它做到「第二次打开零流量」 |
+| 路径安全 | 拒绝 `..`、绝对路径、符号链接逃逸，只允许 `<id>` 目录内的文件 |
+| 鉴权 | 见下方「子资源问题」 |
+
+**子资源问题（必须处理，否则首次打开是白屏）**
+
+`<iframe src=".../web/index.html?token=XXX">` 只会给**入口文档**带上 token。`index.html` 里的 `<script src="app.js">`、`<img src="media/a.png">` 解析成 `.../web/app.js`——**不带 token**。
+
+扩展的对策是：入口探测通过后立刻后台预取整包（预取请求带 token，响应进浏览器缓存），之后子资源命中缓存就不再发请求。但**首帧**仍可能抢在预取完成之前，表现为缺资源或白屏。
+
+所以服务端二选一：
+
+1. **推荐**：对 `GET /api/wallpaper/{id}/web/*` **放宽为不需要 token**。这些是创作者上传的静态资源，本身不是敏感数据；`/api/wallpaper/{id}` 这类 JSON 接口照旧鉴权即可。
+2. 或者：serve 入口 HTML 时把相对路径改写成带 token 的绝对路径（改动面大，不推荐）。
+
+> `<iframe sandbox="allow-scripts allow-same-origin">` 会让网页壁纸与云服务**同源**，它因此能读到自己的 URL（含 token）。这是网页壁纸读写 localStorage 的必要妥协——所以这个服务只该放你自己订阅的壁纸，不要做成公开多租户。
+
 #### `POST /api/wallpaper/{id}/prepare`
 显式触发下载（扩展在用户点「设为背景」时调用），返回 202 与状态。
 
@@ -163,6 +209,26 @@ steamcmd \
 
 > 至少返回 `items[].id`，其余字段缺失不影响扩展使用。
 
+#### `GET /api/thumb?u=<urlencoded>&w=<width>`
+Steam 图片中转。`images.steamusercontent.com` 在国内路由极差（单张十几秒），而工坊浏览页给的是约 900KB 的全尺寸原图。云端代拉一次、缩放后返回，列表就能秒开。
+
+```
+GET /api/thumb?u=https%3A%2F%2Fimages.steamusercontent.com%2Fugc%2F...&w=512&token=XXX
+```
+
+**要求**
+
+- 只允许 `https://`，且 host 命中白名单：
+  - `images.steamusercontent.com`
+  - `*.steamstatic.com`
+  - `*.steamuserimages-a.akamaihd.net`
+
+  > 扩展侧已按同一套白名单过滤，**服务端必须再校验一次**——这是防 SSRF 的唯一屏障。
+- 按宽等比缩到 `w`（默认 512），输出 `image/webp`（浏览器都吃）
+- 禁止跟随重定向到白名单之外；限制响应体积（如 20MB）与上游超时（如 20 秒）
+- 缓存：`Cache-Control: public, max-age=604800, immutable`
+- `127.0.0.1`、`10.*`、`172.16-31.*`、`192.168.*`、`169.254.*`（云元数据）一律拒绝
+
 #### `DELETE /api/wallpaper/{id}`
 删除该壁纸的磁盘缓存。
 
@@ -177,6 +243,7 @@ steamcmd \
 - 上限 `MAX_CACHE_GB`（默认 50）
 - 后台任务每 10 分钟检查一次：超限时按 **最后访问时间（atime/mtime）LRU** 删除整个 `<id>/` 目录，直到低于上限的 90%
 - 提供一个 `GET /api/cache` 返回当前占用与条目数
+- 网页壁纸整包可能很大（几十 MB 到几百 MB 的 webm 素材），LRU 要按**目录总大小**算，不能只数条目
 
 ### 4.5 鉴权
 
@@ -186,6 +253,7 @@ steamcmd \
   > 扩展端的资源直链只能通过查询参数鉴权。推荐实现成 FastAPI 依赖：
   > 先读 `Authorization` 头，取不到再读 `request.query_params.get("token")`，
   > 两者都没有或都不匹配才返回 401。
+- **例外**：`GET /api/wallpaper/{id}/web/*` 建议整条前缀放行（原因见 4.3 的「子资源问题」）
 - 未配置时**拒绝启动**（避免裸奔）
 - `/api/health` 可选开放，其余一律校验
 - 不需要用户体系、不需要 JWT
@@ -248,7 +316,15 @@ expose_headers=["Content-Range","Accept-Ranges","Content-Length"]
   project.json             必存，元数据
   scene.pkg                场景类壁纸的打包文件（浏览器无法渲染，只用 preview）
   <任意名称>.mp4           视频类壁纸的完整成片，文件名不固定
+  index.html + 资源目录    网页类壁纸（type=web）的完整站点，入口固定 index.html，
+                           常见 app.js / css/ / media/ / *.webm，文件数量和体积都不定
 ```
+
+> 区分类型靠 `project.json` 的 `type`，不要靠文件名猜。`type=web` 才走 `/web/*` 与 `/web/files`；
+> 其余类型 `web/files` 返回空数组即可。
+>
+> 遍历 `/web/files` 时记得**跳过** `preview.jpg` / `project.json` / `scene.pkg` / `*.mp4`，
+> 否则扩展会把它们也当包内资源预取一遍，白耗流量。
 
 **preview.jpg 实测尺寸分布**（64 个样本）：524 / 768 / 945 / 1079 / 1080 / **1431** px 见方。
 即：Steam 接口下发的 1024 是被压缩过的，本地原图最高达 1431×1431。
@@ -280,24 +356,33 @@ expose_headers=["Content-Range","Accept-Ranges","Content-Length"]
 6. 不带 Token 请求返回 `401`；
 7. `docker compose up -d` 后 `docker ps` 显示容器 healthy；
 8. **`curl -I ".../preview.jpg?token=$TOKEN"`（不带任何请求头）返回 200** —— 这是 `<img>` 直链能用的前提；
-9. `curl -I ".../video.mp4?token=$TOKEN"` 同样返回 200 且带 `Accept-Ranges: bytes`。
+9. `curl -I ".../video.mp4?token=$TOKEN"` 同样返回 200 且带 `Accept-Ranges: bytes`；
+10. `curl ".../api/wallpaper/<网页壁纸ID>/web/files?token=$TOKEN"` 返回 `files` 数组，且第一项是 `index.html`；
+11. `curl -I ".../api/wallpaper/<网页壁纸ID>/web/index.html"`（**故意不带 token**）返回 `200` + `Content-Type: text/html` —— 子资源放行是否生效就看这条；
+12. 用浏览器直接打开 `.../web/index.html?token=$TOKEN`，页面里的脚本、图片、字体**全部加载成功**（F12 Network 无 401），且控制台无报错；
+13. `curl -I ".../api/thumb?u=<任一张steamusercontent图片，urlencoded>&w=512&token=$TOKEN"` 返回 `200`，且 `Content-Type` 是浏览器能直接显示的图片格式（`image/webp` 或 `image/jpeg`）；
+14. `curl ".../api/thumb?u=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F&token=$TOKEN"` 返回 `400`，**绝不能把内网内容读出来**（SSRF 底线）。
 
 ---
 
 ## 九、扩展端如何对接（**已实现**，按此对齐即可）
 
-扩展侧已经写好客户端（`src/we-cloud.js`），设置 → WE 工坊 → 云端原图与完整视频里填**服务地址 + API Token**，勾上开关即生效。实际调用时序如下，服务端按此保证即可：
+扩展侧已经写好客户端（`src/we-cloud.js` + `src/we-cache.js`），设置 → WE 工坊 → 云端原图与完整视频里填**服务地址 + API Token**，勾上开关即生效。实际调用时序如下，服务端按此保证即可：
 
 | 时机 | 请求 | 期望 |
 |---|---|---|
-| 点「测试连接」 | `GET /api/health`（Bearer + `?token=`） | 200 + JSON |
+| 点「测试连接」 | `GET /api/health`（Bearer + `?token=`） | 200 + JSON；随后还会用 `<img>` 无头拉一次 `preview.jpg` 验证 `?token=` |
 | 打开某张壁纸的详情 | `GET /api/wallpaper/{id}` | `state=ready` 时用 `preview.width/height`、`video` 字段渲染规格 |
 | 列表加载完 | `GET /api/library?page=1&size=200` | 一次请求，命中则给卡片打「云端」角标；失败静默 |
+| 列表里的每张缩略图 | `GET /api/thumb?u=<Steam图>&w=512`（仅 `?token=`） | 云端代拉 + 缩放，webp 返回；不支持时扩展直接用 Steam 原地址 |
 | 点「设为起始页背景」 | `POST /api/wallpaper/{id}/prepare` | `ready` 立即生效；`downloading/queued` 时扩展先用手上素材顶上，每 4 秒轮询一次（最长 5 分钟），就绪后自动切换 |
 | 渲染预览图 / 视频 | `GET .../preview.jpg`、`GET .../video.mp4`（仅 `?token=`） | 图片可长期直引；视频必须 206 流式 |
-| 设为背景 | 同上两个 URL 直接给 `<img>` / `<video>` | **不下载、不落盘** |
+| 网页壁纸入口探测 | `GET .../web/index.html`（仅 `?token=`） | 必须 200 + `text/html`，否则扩展放弃 iframe 回落图片 |
+| 网页壁纸预取 | 先 `GET .../web/files`，再按清单逐个 `GET .../web/<path>` | **靠响应的 Cache-Control 进浏览器磁盘缓存**，之后 iframe 子资源零请求 |
+| 设为背景 | 上述 URL 直接给 `<img>` / `<video>` / `<iframe>` | **不下载、不落盘**（网页壁纸的整包预取除外，那是浏览器 HTTP 缓存） |
 
-服务端只需要保证四件事：**接口稳定、`?token=` 能鉴权、Range 正确、URL 可长期直接引用**。
+服务端需要保证：**接口稳定、`?token=` 能鉴权、Range 正确、URL 可长期直接引用、`/web/*` 子资源放行**。
 
-> 一个容易踩的坑：`/api/wallpaper/{id}` 在 `downloading` 阶段**必须秒回 202/200**（不能阻塞等下载），
-> 否则扩展的轮询会一直卡在超时上。
+> 两个容易踩的坑：
+> 1. `/api/wallpaper/{id}` 在 `downloading` 阶段**必须秒回 202/200**（不能阻塞等下载），否则扩展的轮询会一直卡在超时上。
+> 2. `/web/*` 如果严格要求 token，网页壁纸**首次打开必然缺资源**（子请求不带 token），表现为黑屏或排版错乱——这是最容易被当成「扩展坏了」的问题。
