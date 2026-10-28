@@ -13,6 +13,7 @@
 
 import { STORAGE_KEYS } from './defaults.js';
 import { getRaw, setRaw } from './storage.js';
+import { cloudAssetUrl, cloudIsCoolingDown, fetchCloudWallpaper } from './we-cloud.js';
 
 export const WE_APPID = 431960;
 
@@ -162,10 +163,18 @@ export const KIND_LABELS = {
  * 只有 Steam 提供的预览件。所以这里给的是「素材能力的上限」而不是猜测。
  *
  * @param {{kind:string}} profile
+ * @param {{state:string, preview?:{width:number,height:number}, video?:object|null}} [cloud]
+ *        云端已就绪的记录：有完整视频时起始页能直接播原片，能力比 Steam 预览高一档
  * @returns {{level:'full'|'preview'|'none', title:string, detail:string}}
  */
-export function startPageCapability(profile) {
+export function startPageCapability(profile, cloud) {
   const kind = (profile && profile.kind) || '';
+  const cloudReady = Boolean(cloud && cloud.state === 'ready');
+  const cloudVideo = Boolean(cloudReady && cloud.video);
+  const cloudPreview = cloudReady && cloud.preview && cloud.preview.width && cloud.preview.height
+    ? `${cloud.preview.width}×${cloud.preview.height}`
+    : '';
+
   if (kind === 'web' || kind === 'application') {
     return {
       level: 'none',
@@ -174,6 +183,20 @@ export function startPageCapability(profile) {
     };
   }
   if (kind === 'video') {
+    if (cloudVideo) {
+      return {
+        level: 'full',
+        title: '可完整动态播放',
+        detail: '云端已提供完整视频，起始页会直接播放原片，动态效果不需要 Wallpaper Engine。',
+      };
+    }
+    if (cloudPreview) {
+      return {
+        level: 'preview',
+        title: '可展示清晰静态预览',
+        detail: `云端已提供作者原图 ${cloudPreview}，起始页用它作静态背景；动态成片需在 Wallpaper Engine 中播放。`,
+      };
+    }
     return {
       level: 'preview',
       title: '可展示静态预览',
@@ -181,6 +204,13 @@ export function startPageCapability(profile) {
     };
   }
   if (kind === 'scene') {
+    if (cloudPreview) {
+      return {
+        level: 'preview',
+        title: '可展示清晰静态预览',
+        detail: `3D 场景需 Wallpaper Engine 运行；云端已提供作者原图 ${cloudPreview}，起始页用它作静态背景。`,
+      };
+    }
     return {
       level: 'preview',
       title: '可展示静态预览',
@@ -190,7 +220,9 @@ export function startPageCapability(profile) {
   return {
     level: 'full',
     title: '可在起始页展示',
-    detail: '起始页会用 Steam 提供的预览图铺满屏幕。',
+    detail: cloudReady
+      ? '起始页会用云端提供的作者原图铺满屏幕。'
+      : '起始页会用 Steam 提供的预览图铺满屏幕。',
   };
 }
 
@@ -545,7 +577,7 @@ export async function saveWeLibrary(items) {
  * @returns {Promise<{image:string, video:string|null, item:object}>}
  *   video 有值时优先用动态视频作起始页背景，失败自然降级到 image（由调用方处理）。
  */
-export async function resolveWeBackground(bg) {
+export async function resolveWeBackground(bg, cloud) {
   const mode = bg.weMode === 'daily' ? 'daily' : 'fixed';
 
   if (mode === 'fixed') {
@@ -564,6 +596,23 @@ export async function resolveWeBackground(bg) {
   const today = localDateKey();
   const cache = await getRaw(STORAGE_KEYS.weCache).catch(() => null);
   const item = library[dayOfYear() % library.length];
+
+  // 云端优先：这一张如果云端已有完整素材，直接用原片。
+  // 也顺带解决「Steam 拿不到就整个失败」的问题——权重比预览清晰度更关键。
+  if (cloud && cloud.url && !cloudIsCoolingDown()) {
+    try {
+      const record = await fetchCloudWallpaper(cloud, item.id, { timeout: 8000 });
+      if (record && record.state === 'ready') {
+        return {
+          image: cloudAssetUrl(cloud, item.id, 'preview'),
+          video: record.video ? cloudAssetUrl(cloud, item.id, 'video') : '',
+          item: { ...item, cloud: true },
+        };
+      }
+    } catch (err) {
+      /* 云端不可用就继续走 Steam */
+    }
+  }
 
   // v4 = 直接取 API 原图（preview_url 去参数），不再抓详情页 HTML
   if (cache && cache.v === 4 && cache.date === today && cache.id === item.id) {

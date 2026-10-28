@@ -45,6 +45,10 @@ export const DEFAULT_SETTINGS = {
     // 本地壁纸库里该作者原图的媒体 id（有值时优先于 weImage —— Steam 只给 1024 压缩件）
     weLocalMediaId: '',
     weFit: 'cover', // cover（填满裁切）| contain（完整显示，等比缩放留边）
+    // 自建壁纸云服务（steamcmd 下载工坊文件后提供原图 / 完整视频的 HTTP 直链）。
+    // 地址留空则不启用；token 存在 secrets.weCloud.token，不随配置导出
+    weCloudEnabled: true,
+    weCloudUrl: '',
     // 应用到桌面：Steam 的 workshop/content/431960 目录（按 <目录>\<壁纸ID>\project.json 定位）
     weWorkshopPath: 'C:\\Program Files (x86)\\Steam\\steamapps\\workshop\\content\\431960',
     // 订阅成功后等待下载完成再自动发送应用命令
@@ -121,6 +125,11 @@ export const DEFAULT_SECRETS = {
     model: '',
     authHeader: 'Authorization',
     authPrefix: 'Bearer ',
+  },
+  // 自建壁纸云服务的访问令牌（Bearer）。资源直链还会以 ?token= 形式携带，
+  // 因为 <img> / <video> 无法自定义请求头
+  weCloud: {
+    token: '',
   },
 };
 

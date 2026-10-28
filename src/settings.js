@@ -28,6 +28,14 @@ import {
   scanLocalLibrary,
   summarizeLibrary,
 } from './we-local.js';
+import {
+  cloudAssetUrl,
+  cloudHealth,
+  fetchCloudLibraryIds,
+  isCloudReady,
+  readCloudConfig,
+  resetCloudCooldown,
+} from './we-cloud.js';
 import { fetchWallhavenList } from './wallhaven.js';
 import {
   getSteamSession,
@@ -245,6 +253,23 @@ export class SettingsDrawer {
               <div class="hint">工坊预览多为方形件（约 1024px）：直接铺满会裁掉大半且发糊，所以比例差距大时会自动按「完整显示 + 虚化铺底」呈现，画面不裁切、也不放大。</div>
             </div>
             <button class="btn ghost sm" type="button" data-role="we-browse">${icon('image')}浏览创意工坊，挑壁纸 / 订阅 / 设背景</button>
+            <div class="row">
+              <div class="row-text">
+                <span class="row-title">云端原图与完整视频</span>
+                <span class="row-desc">由你自己的服务器拉取工坊原始文件，扩展只引用直链——能拿到作者原图与完整 mp4，且不占本地磁盘</span>
+              </div>
+              <label class="switch"><input type="checkbox" data-path="background.weCloudEnabled" /><span></span></label>
+            </div>
+            <div class="field">
+              <label for="set-we-cloud">服务地址</label>
+              <input id="set-we-cloud" class="input" type="text" data-path="background.weCloudUrl" placeholder="https://wallpaper.example.com" autocomplete="off" spellcheck="false" />
+              <label for="set-we-cloud-token" style="margin-top:10px">API Token</label>
+              <input id="set-we-cloud-token" class="input" type="password" data-secret="weCloud.token" placeholder="与服务端 API_TOKEN 一致" autocomplete="off" spellcheck="false" />
+              <div class="ws-local-actions">
+                <button class="btn sm" type="button" data-role="we-cloud-test">${icon('database')}测试连接</button>
+              </div>
+              <div class="hint" data-role="we-cloud-status">Steam 只给 1024 压缩预览、视频件仅 192px 动图；完整素材走 Steam 的 depot 协议，浏览器无法直连下载。填了这里之后，工坊详情与起始页背景都会优先用云端直链。留空则不启用。</div>
+            </div>
             <div class="field">
               <label>本地壁纸库（真实原图 / 完整视频）</label>
               <div class="ws-local-actions">
@@ -690,6 +715,8 @@ export class SettingsDrawer {
         else if (isRange || el.type === 'number') value = Number(el.value);
         else value = el.value;
         this.queueSettings(path, value);
+        // 云服务地址一改，之前那次失败就不该再拦着请求
+        if (path === 'background.weCloudUrl') resetCloudCooldown();
         this.updateRangeLabels();
         this.syncDerivedUi();
       });
@@ -708,6 +735,8 @@ export class SettingsDrawer {
         this.persistSecrets();
         // 切换元宝鉴权方式时立即同步字段显隐，避免用户在多套凭证之间困惑
         if (path === 'yuanbao.authMode') this.syncYuanbaoAuth();
+        // token 改了要允许立刻重试，别被上一次失败拦住
+        if (path === 'weCloud.token') resetCloudCooldown();
       });
     });
   }
@@ -778,6 +807,9 @@ export class SettingsDrawer {
 
     const weLocalSync = this.root.querySelector('[data-role="we-local-sync"]');
     if (weLocalSync) weLocalSync.addEventListener('click', () => this.updateLocalWeLibrary(weLocalSync));
+
+    const weCloudTest = this.root.querySelector('[data-role="we-cloud-test"]');
+    if (weCloudTest) weCloudTest.addEventListener('click', () => this.testCloudService(weCloudTest));
 
     const weLoginBtn = this.root.querySelector('[data-role="we-login-btn"]');
     if (weLoginBtn) {
@@ -1192,6 +1224,82 @@ export class SettingsDrawer {
   }
 
   /** 同步分段控件 / 卡片 / 面板显隐等派生状态。 */
+  /* ------------------------------ 壁纸云服务 ------------------------------ */
+
+  /** 测试云服务连通性：地址能否访问、token 是否配对、steamcmd 是否就绪。 */
+  async testCloudService(button) {
+    const statusEl = this.root.querySelector('[data-role="we-cloud-status"]');
+    const wasDisabled = button ? button.disabled : false;
+    if (button) button.disabled = true;
+    if (statusEl) statusEl.textContent = '正在连接云服务…';
+    try {
+      // 输入框刚改完可能还在防抖里，先落盘再测，避免拿旧地址去请求
+      await this.flushSettings();
+      await this.flushSecrets();
+      const settings = this.app.getSettings() || {};
+      const secrets = this.app.getSecrets() || {};
+      const config = readCloudConfig(settings.background || {}, secrets);
+      if (!isCloudReady(config)) {
+        if (statusEl) {
+          statusEl.textContent = '请先填写服务地址（如 https://wallpaper.example.com），并确认上方开关已打开。';
+        }
+        return;
+      }
+      const health = await cloudHealth(config);
+      const parts = ['连接成功'];
+      parts.push(health && health.steamcmd === false ? '但 steamcmd 不可用' : 'steamcmd 可用');
+      const cached = Number(health && health.cached);
+      if (Number.isFinite(cached) && cached >= 0) parts.push(`已缓存 ${cached} 张`);
+      const diskMb = Number(health && health.diskUsedMB);
+      if (Number.isFinite(diskMb) && diskMb > 0) parts.push(`占用 ${(diskMb / 1024).toFixed(1)} GB`);
+
+      // 关键一项：<img>/<video> 带不了请求头，资源直链只能靠 ?token= 鉴权。
+      // 只测 /api/health 会漏掉这个坑（头通了、直链 401，图片一片空白）。
+      const probe = await this.probeCloudAsset(config);
+      if (probe === 'denied') {
+        if (statusEl) {
+          statusEl.textContent =
+            '接口通了，但资源直链鉴权失败——服务端必须支持 ?token= 查询参数（需求文档 4.5）。否则图片和视频都加载不出来。';
+        }
+        return;
+      }
+      if (probe === 'ok') parts.push('直链可用');
+
+      if (statusEl) statusEl.textContent = `${parts.join(' · ')}（${config.url}）`;
+      toast('云服务连接正常', 'ok');
+      // token 不在背景内容签名里，改完需要强制重新解析
+      if (typeof this.app.refreshBackground === 'function') this.app.refreshBackground();
+    } catch (err) {
+      if (statusEl) statusEl.textContent = `连接失败：${describeError(err)}`;
+    } finally {
+      if (button) button.disabled = wasDisabled;
+    }
+  }
+
+  /**
+   * 验证资源直链（不带任何请求头，模拟 <img> 的取图方式）。
+   * @returns {Promise<'ok'|'denied'|'skip'>} skip = 云端还没有任何壁纸，无从验证
+   */
+  async probeCloudAsset(config) {
+    const ids = await fetchCloudLibraryIds(config, { size: 1 }).catch(() => null);
+    if (!ids || !ids.size) return 'skip';
+    const url = cloudAssetUrl(config, [...ids][0], 'preview');
+    if (!url) return 'skip';
+    return new Promise((resolve) => {
+      const probe = new Image();
+      const timer = window.setTimeout(() => resolve('denied'), 8000);
+      probe.onload = () => {
+        window.clearTimeout(timer);
+        resolve(probe.naturalWidth > 0 ? 'ok' : 'denied');
+      };
+      probe.onerror = () => {
+        window.clearTimeout(timer);
+        resolve('denied');
+      };
+      probe.src = url;
+    });
+  }
+
   /* ------------------------------ 本地 WE 壁纸库 ------------------------------ */
 
   /** 渲染本地库状态。 */

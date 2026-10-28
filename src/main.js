@@ -87,6 +87,13 @@ const app = {
     applyAll();
     return { settings, secrets, sites };
   },
+
+  /** 强制按当前设置重新解析背景：云服务 token 这类不体现在内容签名里的改动需要它。 */
+  refreshBackground() {
+    if (!bgController) return;
+    bgController.signature = '';
+    bgController.update(state.settings);
+  },
 };
 
 /** 把最新设置应用到各模块。 */
@@ -204,6 +211,7 @@ async function bootstrap() {
   bgController = new BackgroundController({
     root: bgRoot,
     layers: [document.getElementById('bg-layer-a'), document.getElementById('bg-layer-b')],
+    getSecrets: () => state.secrets,
     onToast: (message, type) => safeToast(message, type),
   });
 

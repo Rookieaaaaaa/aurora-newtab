@@ -14,6 +14,7 @@ import {
   resolveWallhaven,
 } from './wallhaven.js';
 import { resolveLocalWeBackground } from './we-local.js';
+import { cloudAssetUrl, isCloudReady, readCloudConfig } from './we-cloud.js';
 import { fetchPreviewAssets, resolveWeBackground } from './weworkshop.js';
 
 const FADE_MS = 400;
@@ -498,11 +499,13 @@ export class BackgroundController {
    * @param {object} options
    * @param {HTMLElement} options.root 背景容器（承载 --bg-blur / --bg-dim 变量）
    * @param {HTMLElement[]} options.layers 两个背景层
+   * @param {Function} [options.getSecrets] () => secrets（云服务 token 存在密钥里）
    * @param {Function} [options.onToast] (message, type) => void
    */
-  constructor({ root, layers, onToast }) {
+  constructor({ root, layers, getSecrets, onToast }) {
     this.root = root;
     this.layers = layers;
+    this.getSecrets = typeof getSecrets === 'function' ? getSecrets : () => ({});
     this.onToast = typeof onToast === 'function' ? onToast : () => {};
     this.activeIndex = 0;
     this.signature = '';
@@ -544,6 +547,11 @@ export class BackgroundController {
       weImage: bg.weImage,
       weVideo: bg.weVideo,
       weFit: bg.weFit,
+      // 云端直链相关：改服务地址/开关后需要重新解析背景
+      weCloudItemId: bg.weCloudItemId,
+      weCloudVideo: bg.weCloudVideo,
+      weCloudUrl: bg.weCloudUrl,
+      weCloudEnabled: bg.weCloudEnabled,
     });
   }
 
@@ -666,18 +674,48 @@ export class BackgroundController {
       // 是作者上传的原图（实测最高 1431px）。取不到再走 Steam。
       let localObjectUrl = '';
       let record = null;
-      if (bg.weLocalMediaId) {
+
+      /** 当前云服务配置（未配置或异常返回 null）。 */
+      let cloudConfig = null;
+      try {
+        const cfg = readCloudConfig(bg, this.getSecrets());
+        if (isCloudReady(cfg)) cloudConfig = cfg;
+      } catch (err) {
+        /* 配置异常就当没配 */
+      }
+
+      /** 回落链：本地 WE 原图 > Steam 预览。 */
+      const resolveFallback = async () => {
+        if (bg.weLocalMediaId) {
+          try {
+            const local = await resolveLocalWeBackground(bg);
+            if (local) {
+              localObjectUrl = local.image;
+              return local;
+            }
+          } catch (err) {
+            /* 本地缓存失效就继续回落到 Steam */
+          }
+        }
+        // 每日轮换模式下，云端优先的判定在 resolveWeBackground 内部完成
+        return resolveWeBackground(bg, cloudConfig);
+      };
+
+      // 优先级：云端直链 > 本地 WE 目录 > Steam 预览
+      // 云端是唯一能拿到作者原图与完整 mp4 的途径，且一个字节都不落在本地
+      if (bg.weCloudItemId && cloudConfig) {
         try {
-          const local = await resolveLocalWeBackground(bg);
-          if (local) {
-            record = local;
-            localObjectUrl = local.image;
+          const cloudId = String(bg.weCloudItemId);
+          const image = cloudAssetUrl(cloudConfig, cloudId, 'preview');
+          const video = bg.weCloudVideo ? cloudAssetUrl(cloudConfig, cloudId, 'video') : '';
+          if (image) {
+            record = { image, video, item: { id: cloudId, title: bg.weTitle || '', cloud: true } };
           }
         } catch (err) {
-          /* 本地缓存失效就回落到 Steam */
+          /* 云端配置异常就直接走回落链 */
         }
       }
-      if (!record) record = await resolveWeBackground(bg);
+      if (!record) record = await resolveFallback();
 
       /** 本地原图是 blob 地址，图层销毁时释放。 */
       const releaseLocalUrl = () => {
@@ -786,6 +824,26 @@ export class BackgroundController {
         }
         return img;
       };
+
+      // 云端直链：有视频就优先播（这才是 4K 动态壁纸的意义），否则用作者原图。
+      // 两者都拿不到说明服务不可达 → 回落本地/Steam，不能整个背景塌成渐变
+      if (record.item && record.item.cloud) {
+        if (record.video) {
+          try {
+            const video = await probeVideoMeta(record.video);
+            if (video) return makeVideoLayer(video);
+          } catch (err) {
+            console.warn('[background] 云端视频加载失败，改用云端原图：', err);
+          }
+        }
+        try {
+          const img = await loadImage(record.image, IMAGE_TIMEOUT);
+          return makeImageLayer(img);
+        } catch (err) {
+          console.warn('[background] 云端壁纸加载失败，回落到本地 / Steam：', err);
+          record = await resolveFallback();
+        }
+      }
 
       if (record.video) {
         let video = null;

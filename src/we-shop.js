@@ -9,6 +9,18 @@ import { openModal, toast } from './dialog.js';
 import { icon } from './icons.js';
 import { describeError, getPath } from './utils.js';
 import {
+  cloudAssetUrl,
+  cloudIsCoolingDown,
+  describeCloudMedia,
+  describeCloudState,
+  fetchCloudLibraryIds,
+  fetchCloudWallpaper,
+  isCloudReady,
+  prepareCloudWallpaper,
+  readCloudConfig,
+  waitCloudReady,
+} from './we-cloud.js';
+import {
   getLocalPreviewUrl,
   getLocalWallpaper,
   loadLocalLibrary,
@@ -283,6 +295,7 @@ export class WorkshopShop {
         statusEl.hidden = true;
         this.annotateKinds(grid, result.items);
         this.markLocalWallpapers(grid, result.items);
+        void this.markCloudWallpapers(grid, result.items);
       } else if (this.state.page > 1) {
         statusEl.textContent = '没有更多了';
         this.state.hasNext = false;
@@ -346,6 +359,27 @@ export class WorkshopShop {
   }
 
   /**
+   * 标出云端已经缓存过的壁纸。
+   * 只发一次 /api/library，失败静默——这是提示，不该影响浏览。
+   */
+  async markCloudWallpapers(grid, items) {
+    const config = this.cloudConfig();
+    if (!config) return;
+    const ids = await fetchCloudLibraryIds(config);
+    if (!ids || !ids.size) return;
+    for (const item of items) {
+      if (!ids.has(String(item.id))) continue;
+      const card = grid.querySelector(`[data-id="${item.id}"]`);
+      if (!card || card.querySelector('.ws-cloud-tag')) continue;
+      const tag = document.createElement('span');
+      tag.className = 'ws-cloud-tag';
+      tag.textContent = '云端';
+      tag.title = '服务端已缓存这张壁纸的原图 / 视频，点开可看原片';
+      card.appendChild(tag);
+    }
+  }
+
+  /**
    * 批量补上类型标记（视频 / 3D 场景 / 网页…）。
    *
    * 视频类的预览件只是 192px 的动图，放大到卡片尺寸必然发虚——不标一句
@@ -393,6 +427,37 @@ export class WorkshopShop {
 
   /* ------------------------------ 详情 ------------------------------ */
 
+  /** 当前云服务配置（未配置返回 null）。 */
+  cloudConfig() {
+    try {
+      const settings = (this.app.getSettings && this.app.getSettings()) || {};
+      const secrets = (this.app.getSecrets && this.app.getSecrets()) || {};
+      const config = readCloudConfig(settings.background || {}, secrets);
+      return isCloudReady(config) ? config : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
+   * 查询云端状态。
+   * 返回结构区分「服务说你没有这张」和「服务根本没连上」——前者是正常状态，
+   * 后者要如实告诉用户，否则会误以为服务在跑只是没缓存。
+   * @returns {Promise<{record: object|null, failed: boolean}>}
+   */
+  async queryCloud(id, config) {
+    if (!config) return { record: null, failed: false };
+    // 刚连不上过就先跳过，别让每次打开详情都白等一个超时
+    if (cloudIsCoolingDown()) return { record: null, failed: true };
+    try {
+      // fetchCloudWallpaper 内部已经规范化过，直接用
+      const record = await fetchCloudWallpaper(config, id, { timeout: 6000 });
+      return { record, failed: false };
+    } catch (err) {
+      return { record: null, failed: true };
+    }
+  }
+
   /** 详情弹窗：左侧按素材真实比例预览，右侧给出类型/分辨率/效果与起始页能力。 */
   openDetail(item) {
     // 本地原图走的是 blob 地址，弹窗关闭时要还回去
@@ -411,6 +476,7 @@ export class WorkshopShop {
         <div class="ws-detail-chips"></div>
         <div class="ws-detail-cap"></div>
         <dl class="ws-detail-stats"></dl>
+        <div class="ws-cloud" data-role="ws-cloud" hidden></div>
         <div class="ws-startpage">
           <div class="ws-sp-canvas">
             <div class="ws-sp-bg" aria-hidden="true"></div>
@@ -468,13 +534,17 @@ export class WorkshopShop {
           chipsEl.after(row);
         }
 
-        // 起始页能力：说清楚「能还原到什么程度」
-        const capability = startPageCapability(profile);
-        capEl.className = `ws-detail-cap is-${capability.level}`;
-        capEl.innerHTML =
-          '<span class="ws-cap-dot"></span><span class="ws-cap-body"><b></b><i></i></span>';
-        capEl.querySelector('b').textContent = capability.title;
-        capEl.querySelector('i').textContent = capability.detail;
+        // 起始页能力：说清楚「能还原到什么程度」。
+        // 先按 Steam 素材给一版，云端查完若能力更强再刷新（避免为等网络拖慢首屏）
+        const renderCapability = (cloudState) => {
+          const capability = startPageCapability(profile, cloudState);
+          capEl.className = `ws-detail-cap is-${capability.level}`;
+          capEl.innerHTML =
+            '<span class="ws-cap-dot"></span><span class="ws-cap-body"><b></b><i></i></span>';
+          capEl.querySelector('b').textContent = capability.title;
+          capEl.querySelector('i').textContent = capability.detail;
+        };
+        renderCapability(null);
 
         // 统计
         const subs = Number(detail && detail.subscriptions) || 0;
@@ -499,19 +569,78 @@ export class WorkshopShop {
           statsEl.append(dt, dd);
         });
 
-        // 预览素材：本地 WE 原图 > Steam 原件
+        // 预览素材优先级：云端直链（作者原图 / 完整视频）> 本地 WE 目录 > Steam 原件
         const full = (assets && assets.image) || item.preview;
-        const probe = await probePreviewMedia(full);
+        const cloud = this.cloudConfig();
+        const cloudProbe = cloud
+          ? await this.queryCloud(item.id, cloud)
+          : { record: null, failed: false };
+        const cloudRecord = cloudProbe.record;
+        if (!document.body.contains(media)) return;
+        const cloudReady = Boolean(cloudRecord && cloudRecord.state === 'ready');
+        const cloudPreview = cloudReady ? cloudAssetUrl(cloud, item.id, 'preview') : '';
+        const cloudVideo = cloudReady && cloudRecord.video ? cloudAssetUrl(cloud, item.id, 'video') : '';
+        // 云端已就绪就不必再下载 Steam 那张 1024 压缩件
+        const probe = cloudReady ? null : await probePreviewMedia(full);
         if (!document.body.contains(media)) return;
 
+        // 云端状态行：没配置服务就不显示；配置了就把服务端真实状态讲清楚
+        const cloudEl = media.querySelector('[data-role="ws-cloud"]');
+        if (cloudEl && cloud) {
+          const state = cloudProbe.failed
+            ? { tone: 'warn', text: '云端连接失败，已回落到 Steam / 本地素材' }
+            : describeCloudState(cloudRecord);
+          cloudEl.hidden = false;
+          cloudEl.dataset.tone = state.tone;
+          cloudEl.innerHTML = `${icon('database')}<span></span>`;
+          cloudEl.querySelector('span').textContent = cloudReady
+            ? `云端已就绪${cloudRecord.video ? ' · 含完整视频' : ''}`
+            : state.text;
+        }
+        // 云端有完整视频时，起始页能力从「静态预览」升级为「完整动态播放」
+        if (cloudReady) renderCapability(cloudRecord);
+
         // 本地 WE 目录里是作者上传的原图，Steam 那张 1024 只是它的压缩件
-        const local = await getLocalWallpaper(item.id);
+        const local = cloudReady ? null : await getLocalWallpaper(item.id);
         const localUrl = local && local.mediaId ? await getLocalPreviewUrl(item.id) : '';
         if (!document.body.contains(media)) return;
         if (localUrl) localObjectUrl = localUrl;
 
         let source = (probe && probe.objectUrl) || full;
-        if (localUrl) {
+        let cloudVideoEl = null;
+        if (cloudPreview) {
+          source = cloudPreview;
+          img.classList.remove('is-lowres');
+          const parts = [describeCloudMedia(cloudRecord)];
+          if (profile.resolution) parts.push(`壁纸本体 ${profile.resolution.label}`);
+          captionEl.textContent = parts.filter(Boolean).join(' · ');
+          // 有完整成片就换成可播放的 <video>——Steam 那边只给 192px 动图
+          if (cloudVideo) {
+            cloudVideoEl = document.createElement('video');
+            cloudVideoEl.className = 'ws-detail-img ws-detail-video';
+            cloudVideoEl.src = cloudVideo;
+            cloudVideoEl.autoplay = true;
+            cloudVideoEl.loop = true;
+            cloudVideoEl.muted = true;
+            cloudVideoEl.playsInline = true;
+            cloudVideoEl.preload = 'metadata';
+            cloudVideoEl.setAttribute('playsinline', '');
+            cloudVideoEl.setAttribute('muted', '');
+            const playPromise = cloudVideoEl.play();
+            if (playPromise && typeof playPromise.catch === 'function') playPromise.catch(() => {});
+            // 服务端 ffprobe 可能缺失或不准，视频元数据到手后按实际分辨率改写说明
+            cloudVideoEl.addEventListener('loadedmetadata', () => {
+              if (!cloudVideoEl.videoWidth || !document.body.contains(media)) return;
+              const parts = [];
+              if (cloudRecord.preview.width && cloudRecord.preview.height) {
+                parts.push(`云端原图 ${cloudRecord.preview.width}×${cloudRecord.preview.height}`);
+              }
+              parts.push(`完整视频 ${cloudVideoEl.videoWidth}×${cloudVideoEl.videoHeight}`);
+              if (profile.resolution) parts.push(`壁纸本体 ${profile.resolution.label}`);
+              captionEl.textContent = parts.join(' · ');
+            });
+          }
+        } else if (localUrl) {
           source = localUrl;
           img.classList.remove('is-lowres');
           const parts = [`本地原图 ${local.width}×${local.height}`];
@@ -524,7 +653,8 @@ export class WorkshopShop {
           else img.classList.remove('is-lowres');
           captionEl.textContent = describePreviewMedia(probe, profile);
         }
-        if (source) img.src = source;
+        if (cloudVideoEl) img.replaceWith(cloudVideoEl);
+        else if (source) img.src = source;
 
         // 起始页效果：按当前显示方式先模拟一遍，方形素材铺到屏幕上到底什么样
         const spImg = media.querySelector('.ws-sp-img');
@@ -538,7 +668,15 @@ export class WorkshopShop {
           const weFit = background.weFit || 'cover';
           // 与背景引擎同一套判定：contain，或比例差 >15% 时改用「完整显示 + 虚化铺底」
           const screenRatio = (window.innerWidth || 1280) / (window.innerHeight || 720);
-          const mediaRatio = probe && probe.width && probe.height ? probe.width / probe.height : screenRatio;
+          // 有视频时背景会优先播视频铺满，按视频比例模拟才准
+          let mediaRatio = screenRatio;
+          if (cloudVideo && cloudRecord.video.width && cloudRecord.video.height) {
+            mediaRatio = cloudRecord.video.width / cloudRecord.video.height;
+          } else if (cloudReady && cloudRecord.preview.width && cloudRecord.preview.height) {
+            mediaRatio = cloudRecord.preview.width / cloudRecord.preview.height;
+          } else if (probe && probe.width && probe.height) {
+            mediaRatio = probe.width / probe.height;
+          }
           const ratioGap = Math.abs(mediaRatio - screenRatio) / screenRatio;
           const useContain = weFit === 'contain' || ratioGap > 0.15;
           spCanvas.classList.toggle('is-contain', useContain);
@@ -650,8 +788,82 @@ export class WorkshopShop {
     link.remove();
   }
 
-  /** 设为起始页背景：记录全尺寸截图 + 动态视频，背景引擎会按屏幕分辨率自适应取舍。 */
+  /** 设为起始页背景：云端原片优先，其次本地原图，最后 Steam 预览。 */
   async applyBackground(item) {
+    const cloud = this.cloudConfig();
+    if (cloud && (await this.applyCloudBackground(item, cloud))) return;
+    await this.applyLocalOrSteamBackground(item);
+  }
+
+  /**
+   * 走云端：已就绪立即生效；还在下载则先用现成素材顶上，后台等就绪后自动切换。
+   * @returns {Promise<boolean>} 是否已由云端接管（false 表示调用方应回落到本地/Steam）
+   */
+  async applyCloudBackground(item, cloud) {
+    let record = null;
+    try {
+      record = await prepareCloudWallpaper(cloud, item.id);
+    } catch (err) {
+      // 服务不可达就静默回落，别拿网络错误打断「换壁纸」这件事
+      return false;
+    }
+    if (!record) return false;
+
+    if (record.state === 'ready') {
+      await this.applyCloudSettings(item, record);
+      return true;
+    }
+    if (record.state === 'failed' || record.state === 'need_auth' || record.state === 'not_found') {
+      this.onToast(`${describeCloudState(record).text}，改用可用素材`, 'warn');
+      return false;
+    }
+
+    // downloading / queued：先用本地或 Steam 顶上，就绪后自动切换成云端的完整素材
+    this.onToast('云端正在拉取这张壁纸，先用现有素材顶上，就绪后自动切换', 'ok');
+    await this.applyLocalOrSteamBackground(item);
+    const target = String(item.id);
+    waitCloudReady(cloud, target, {
+      interval: 4000,
+      timeout: 300000,
+      // 用户中途换了别的壁纸就别再动设置了
+      shouldContinue: () => {
+        const bg = ((this.app.getSettings() || {}).background) || {};
+        return String(bg.weItemId || '') === target;
+      },
+    })
+      .then(async (final) => {
+        if (!final || final.state !== 'ready') return;
+        const bg = ((this.app.getSettings() || {}).background) || {};
+        if (String(bg.weItemId || '') !== target) return;
+        await this.applyCloudSettings(item, final);
+        this.onToast('云端原片已就绪，背景已切换为完整素材', 'ok');
+      })
+      .catch(() => {});
+    return true;
+  }
+
+  /** 把云端素材写进背景设置（背景引擎会优先用云端直链，不占本地磁盘）。 */
+  async applyCloudSettings(item, record) {
+    await this.app.updateSettings({
+      background: {
+        type: 'we',
+        weMode: 'fixed',
+        weItemId: item.id,
+        weTitle: item.title,
+        // 云端就绪标记：背景引擎据此走直链；同时留一张 Steam 缩略图做兜底
+        weCloudItemId: item.id,
+        weCloudVideo: Boolean(record && record.video),
+        weImage: item.preview || '',
+        weVideo: '',
+        weLocalMediaId: '',
+      },
+    });
+    const media = describeCloudMedia(record);
+    this.onToast(media ? `已设为起始页背景（${media}）` : '已设为起始页背景（云端原图）', 'ok');
+  }
+
+  /** 回落素材：本地 WE 原图 > Steam 预览。 */
+  async applyLocalOrSteamBackground(item) {
     this.onToast('正在获取壁纸素材…', 'ok');
     // fetchPreviewAssets 内部已经走一次详情接口并带出 preview_url，不必再单独请求
     const assets = await fetchPreviewAssets(item.id);
@@ -668,6 +880,8 @@ export class WorkshopShop {
         weImage: image,
         weVideo: video,
         weLocalMediaId: (local && local.mediaId) || '',
+        weCloudItemId: '',
+        weCloudVideo: false,
       },
     });
     if (local) {
