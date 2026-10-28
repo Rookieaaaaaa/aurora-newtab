@@ -25,6 +25,81 @@ export const WE_LOCAL_KEY = 'weLocalLibrary';
 /** 视频类壁纸的媒体扩展名。 */
 const VIDEO_EXT = /\.(mp4|webm|mov|m4v)$/i;
 
+/* ------------------------- 目录句柄持久化（免每次选目录） ------------------------- */
+
+const HANDLE_DB = 'aurora-we-local';
+const HANDLE_STORE = 'handles';
+const HANDLE_KEY = 'root';
+
+let handleDbPromise = null;
+
+/** 打开存放目录句柄的小库（句柄不能进 chrome.storage，只能走 IndexedDB）。 */
+function openHandleDb() {
+  if (handleDbPromise) return handleDbPromise;
+  handleDbPromise = new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('当前环境不支持 IndexedDB'));
+      return;
+    }
+    const request = indexedDB.open(HANDLE_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(HANDLE_STORE)) db.createObjectStore(HANDLE_STORE);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('打开句柄库失败'));
+  });
+  return handleDbPromise;
+}
+
+/** 记住上次选的目录，下次「更新」不用重新选。 */
+async function saveRootHandle(handle) {
+  try {
+    const db = await openHandleDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(HANDLE_STORE, 'readwrite');
+      tx.objectStore(HANDLE_STORE).put(handle, HANDLE_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (err) {
+    /* 记不住也不影响本次使用 */
+  }
+}
+
+/** 取回上次的目录句柄。 */
+export async function loadRootHandle() {
+  try {
+    const db = await openHandleDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(HANDLE_STORE, 'readonly');
+      const request = tx.objectStore(HANDLE_STORE).get(HANDLE_KEY);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error);
+    });
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * 确保目录句柄可用（浏览器重启后权限会退回 prompt，需要用户手势重新授权）。
+ * 必须由点击事件调用，否则 requestPermission 会被拒绝。
+ * @returns {Promise<FileSystemDirectoryHandle|null>}
+ */
+export async function ensureRootHandle() {
+  const handle = await loadRootHandle();
+  if (!handle) return null;
+  const options = { mode: 'read' };
+  try {
+    if ((await handle.queryPermission(options)) === 'granted') return handle;
+    if ((await handle.requestPermission(options)) === 'granted') return handle;
+  } catch (err) {
+    /* 用户拒绝或浏览器不支持 */
+  }
+  return null;
+}
+
 /** 空索引。 */
 function emptyIndex() {
   return { items: {}, scannedAt: 0, dirName: '', count: 0 };
@@ -180,7 +255,56 @@ export async function scanLocalLibrary(onProgress) {
     throw new Error('无法打开文件夹选择器，请确认浏览器已授权');
   }
 
+  // 记住目录，之后「更新本地库」只需重新授权、不用重新挑目录
+  await saveRootHandle(root);
   return scanDirectory(root, onProgress);
+}
+
+/**
+ * 增量同步：把 ids 里还没入库、但本地目录里已经存在的壁纸补进来。
+ *
+ * 典型场景——用户在工坊点了「订阅」，Steam 客户端在后台下完，重新打开工坊时
+ * 这里会自动把新壁纸收进库，不用手动重扫整批（重扫会把 64 张原图全部重读一遍）。
+ *
+ * 权限不可用时静默返回 needPermission，不弹窗打扰。
+ *
+ * @param {string[]} ids
+ * @returns {Promise<{added:number, needPermission:boolean, items:Object}|null>}
+ */
+export async function syncLocalLibrary(ids) {
+  const handle = await loadRootHandle();
+  if (!handle) return null;
+
+  let permission = 'denied';
+  try {
+    permission = await handle.queryPermission({ mode: 'read' });
+  } catch (err) {
+    return null;
+  }
+  if (permission !== 'granted') return { added: 0, needPermission: true, items: {} };
+
+  const library = await loadLocalLibrary();
+  const added = [];
+  for (const rawId of ids || []) {
+    const id = String(rawId);
+    if (library.items[id]) continue;
+    try {
+      const dir = await handle.getDirectoryHandle(id);
+      const entry = await readOne(id, dir);
+      if (entry) {
+        library.items[id] = entry;
+        added.push(id);
+      }
+    } catch (err) {
+      /* 本地没有这一张，正常 */
+    }
+  }
+
+  if (added.length) {
+    library.count = Object.keys(library.items).length;
+    await setRaw(WE_LOCAL_KEY, library);
+  }
+  return { added: added.length, needPermission: false, items: library.items };
 }
 
 /**

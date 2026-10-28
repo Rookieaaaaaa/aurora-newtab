@@ -22,7 +22,9 @@ import * as storage from './storage.js';
 import { debounce, deepMerge, describeError, getPath, hostOf, setPath } from './utils.js';
 import {
   clearLocalLibrary,
+  ensureRootHandle,
   loadLocalLibrary,
+  scanDirectory,
   scanLocalLibrary,
   summarizeLibrary,
 } from './we-local.js';
@@ -247,6 +249,7 @@ export class SettingsDrawer {
               <label>本地壁纸库（真实原图 / 完整视频）</label>
               <div class="ws-local-actions">
                 <button class="btn sm" type="button" data-role="we-local-scan">${icon('upload')}选择 WE 工坊目录</button>
+                <button class="btn ghost sm" type="button" data-role="we-local-sync">${icon('refresh')}更新</button>
                 <button class="btn ghost sm" type="button" data-role="we-local-clear">${icon('trash')}清除</button>
               </div>
               <div class="hint" data-role="we-local-status">Steam 只给 1024 方形预览，但订阅过的壁纸在你硬盘上是完整原图与成片视频。选择 <code>...\\steamapps\\workshop\\content\\431960</code> 后，扩展会把原图收进本地库——之后工坊详情和起始页背景都用它。</div>
@@ -773,6 +776,9 @@ export class SettingsDrawer {
     const weLocalClear = this.root.querySelector('[data-role="we-local-clear"]');
     if (weLocalClear) weLocalClear.addEventListener('click', () => this.clearLocalWeLibrary());
 
+    const weLocalSync = this.root.querySelector('[data-role="we-local-sync"]');
+    if (weLocalSync) weLocalSync.addEventListener('click', () => this.updateLocalWeLibrary(weLocalSync));
+
     const weLoginBtn = this.root.querySelector('[data-role="we-login-btn"]');
     if (weLoginBtn) {
       weLoginBtn.addEventListener('click', () => {
@@ -1229,6 +1235,39 @@ export class SettingsDrawer {
         return;
       }
       if (statusEl) statusEl.textContent = `扫描失败：${describeError(err)}`;
+    } finally {
+      if (button) button.disabled = wasDisabled;
+    }
+  }
+
+  /**
+   * 用上次选过的目录重新扫一遍（不用重新挑目录）。
+   * 浏览器重启后授权会退回 prompt，这里借点击这个手势重新要一次权限。
+   */
+  async updateLocalWeLibrary(button) {
+    const statusEl = this.root.querySelector('[data-role="we-local-status"]');
+    const wasDisabled = button ? button.disabled : false;
+    if (button) button.disabled = true;
+    try {
+      const handle = await ensureRootHandle();
+      if (!handle) {
+        if (statusEl) {
+          statusEl.innerHTML =
+            '目录授权已失效。请点「选择 WE 工坊目录」重新指定 <code>...\\steamapps\\workshop\\content\\431960</code>。';
+        }
+        return;
+      }
+      if (statusEl) statusEl.textContent = '正在更新本地库…';
+      const index = await scanDirectory(handle, ({ done, total }) => {
+        if (statusEl) statusEl.textContent = `正在更新本地库 ${done}/${total}…`;
+      });
+      const summary = summarizeLibrary(index);
+      if (statusEl) {
+        statusEl.textContent = `已收录 ${summary.total} 张（视频 ${summary.video} · 场景 ${summary.scene} · 网页 ${summary.web}），原图最高 ${summary.maxWidth}px`;
+      }
+      toast(`本地库已更新：${summary.total} 张`, 'ok');
+    } catch (err) {
+      if (statusEl) statusEl.textContent = `更新失败：${describeError(err)}`;
     } finally {
       if (button) button.disabled = wasDisabled;
     }

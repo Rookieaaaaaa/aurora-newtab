@@ -8,7 +8,12 @@
 import { openModal, toast } from './dialog.js';
 import { icon } from './icons.js';
 import { describeError, getPath } from './utils.js';
-import { getLocalPreviewUrl, getLocalWallpaper } from './we-local.js';
+import {
+  getLocalPreviewUrl,
+  getLocalWallpaper,
+  loadLocalLibrary,
+  syncLocalLibrary,
+} from './we-local.js';
 import {
   KIND_LABELS,
   WE_SORTS,
@@ -277,6 +282,7 @@ export class WorkshopShop {
       if (result.items.length) {
         statusEl.hidden = true;
         this.annotateKinds(grid, result.items);
+        this.markLocalWallpapers(grid, result.items);
       } else if (this.state.page > 1) {
         statusEl.textContent = '没有更多了';
         this.state.hasNext = false;
@@ -303,6 +309,39 @@ export class WorkshopShop {
       statusEl.appendChild(retry);
     } finally {
       this.state.loading = false;
+    }
+  }
+
+  /**
+   * 标出哪些壁纸本地已经有原图，并把新下载的补进本地库。
+   *
+   * 这是「订阅 → 可用」闭环的关键一步：用户在工坊点订阅，Steam 客户端在后台下完，
+   * 下次打开工坊时这里会自动发现并收进来——不用开 WE、不用手动重扫。
+   * 目录授权失效时静默跳过，只在有新增时提示一句。
+   */
+  async markLocalWallpapers(grid, items) {
+    try {
+      const ids = items.map((item) => String(item.id));
+      // 先补漏：本地已有但还没入库的（比如刚订阅下载完的那几张）
+      const sync = await syncLocalLibrary(ids);
+      const library = await loadLocalLibrary();
+      const localIds = new Set(Object.keys(library.items || {}));
+
+      for (const item of items) {
+        if (!localIds.has(String(item.id))) continue;
+        const card = grid.querySelector(`[data-id="${item.id}"]`);
+        if (!card || card.querySelector('.ws-local-tag')) continue;
+        const tag = document.createElement('span');
+        tag.className = 'ws-local-tag';
+        tag.textContent = '本地原图';
+        card.appendChild(tag);
+      }
+
+      if (sync && sync.added > 0) {
+        this.onToast(`本地库里补入 ${sync.added} 张原图`, 'ok');
+      }
+    } catch (err) {
+      /* 标注失败不影响浏览 */
     }
   }
 
