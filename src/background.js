@@ -13,6 +13,7 @@ import {
   persistWallhavenBlob,
   resolveWallhaven,
 } from './wallhaven.js';
+import { resolveLocalWeBackground } from './we-local.js';
 import { fetchPreviewAssets, resolveWeBackground } from './weworkshop.js';
 
 const FADE_MS = 400;
@@ -661,7 +662,33 @@ export class BackgroundController {
       // Wallpaper Engine 创意工坊：分辨率自适应——
       // 工坊预览视频多为 720p webm，铺满高分屏会发糊；视频元数据不够屏幕宽度时
       // 改用全尺寸截图，截图加载失败再回视频，两者都失败才报错
-      const record = await resolveWeBackground(bg);
+      // 本地 WE 原图优先：Steam 只给 1024 方形压缩件，而本地壁纸库里
+      // 是作者上传的原图（实测最高 1431px）。取不到再走 Steam。
+      let localObjectUrl = '';
+      let record = null;
+      if (bg.weLocalMediaId) {
+        try {
+          const local = await resolveLocalWeBackground(bg);
+          if (local) {
+            record = local;
+            localObjectUrl = local.image;
+          }
+        } catch (err) {
+          /* 本地缓存失效就回落到 Steam */
+        }
+      }
+      if (!record) record = await resolveWeBackground(bg);
+
+      /** 本地原图是 blob 地址，图层销毁时释放。 */
+      const releaseLocalUrl = () => {
+        if (!localObjectUrl) return;
+        try {
+          URL.revokeObjectURL(localObjectUrl);
+        } catch (err) {
+          /* ignore */
+        }
+        localObjectUrl = '';
+      };
       // 显示方式：cover 填满裁切（默认，整屏无黑边）；contain 完整显示（等比缩放留边）
       const containFit = bg.weFit === 'contain';
       const applyFit = (el) => {
@@ -719,7 +746,7 @@ export class BackgroundController {
         img.style.objectFit = '';
         img.style.transform = '';
         box.append(fill, img);
-        return { el: box, cleanup: () => {}, pause: () => {}, resume: () => {} };
+        return { el: box, cleanup: releaseLocalUrl, pause: () => {}, resume: () => {} };
       };
 
       const makeImageLayer = (img) => {
@@ -734,7 +761,7 @@ export class BackgroundController {
         img.className = 'bg-media';
         img.dataset.objectUrl = '';
         applyFit(img);
-        return { el: img, cleanup: () => {}, pause: () => {}, resume: () => {} };
+        return { el: img, cleanup: releaseLocalUrl, pause: () => {}, resume: () => {} };
       };
 
       // 低清图自动升级：老数据或详情页抓取失败时，record.image 可能只是几百像素的

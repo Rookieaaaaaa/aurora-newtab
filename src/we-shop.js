@@ -8,6 +8,7 @@
 import { openModal, toast } from './dialog.js';
 import { icon } from './icons.js';
 import { describeError, getPath } from './utils.js';
+import { getLocalPreviewUrl, getLocalWallpaper } from './we-local.js';
 import {
   KIND_LABELS,
   WE_SORTS,
@@ -355,6 +356,8 @@ export class WorkshopShop {
 
   /** 详情弹窗：左侧按素材真实比例预览，右侧给出类型/分辨率/效果与起始页能力。 */
   openDetail(item) {
+    // 本地原图走的是 blob 地址，弹窗关闭时要还回去
+    let localObjectUrl = '';
     const media = document.createElement('div');
     media.className = 'ws-detail';
     media.innerHTML = `
@@ -457,23 +460,38 @@ export class WorkshopShop {
           statsEl.append(dt, dd);
         });
 
-        // 预览素材：换成原图，并如实标出这张预览到底是多少像素
+        // 预览素材：本地 WE 原图 > Steam 原件
         const full = (assets && assets.image) || item.preview;
         const probe = await probePreviewMedia(full);
         if (!document.body.contains(media)) return;
-        if (probe && probe.objectUrl) img.src = probe.objectUrl;
-        else if (full) img.src = full;
-        // 视频类的预览件只有 192px，按容器放大到可辨认的尺寸（会略糊，但总好过指甲盖大小）
-        if (probe && probe.width && probe.width < 640) img.classList.add('is-lowres');
-        else img.classList.remove('is-lowres');
-        captionEl.textContent = describePreviewMedia(probe, profile);
+
+        // 本地 WE 目录里是作者上传的原图，Steam 那张 1024 只是它的压缩件
+        const local = await getLocalWallpaper(item.id);
+        const localUrl = local && local.mediaId ? await getLocalPreviewUrl(item.id) : '';
+        if (!document.body.contains(media)) return;
+        if (localUrl) localObjectUrl = localUrl;
+
+        let source = (probe && probe.objectUrl) || full;
+        if (localUrl) {
+          source = localUrl;
+          img.classList.remove('is-lowres');
+          const parts = [`本地原图 ${local.width}×${local.height}`];
+          if (profile.resolution) parts.push(`壁纸本体 ${profile.resolution.label}`);
+          if (local.video) parts.push('含成片视频');
+          captionEl.textContent = parts.join(' · ');
+        } else {
+          // 视频类的预览件只有 192px，按容器放大到可辨认的尺寸（会略糊，但总好过指甲盖大小）
+          if (probe && probe.width && probe.width < 640) img.classList.add('is-lowres');
+          else img.classList.remove('is-lowres');
+          captionEl.textContent = describePreviewMedia(probe, profile);
+        }
+        if (source) img.src = source;
 
         // 起始页效果：按当前显示方式先模拟一遍，方形素材铺到屏幕上到底什么样
         const spImg = media.querySelector('.ws-sp-img');
         const spBg = media.querySelector('.ws-sp-bg');
         const spCanvas = media.querySelector('.ws-sp-canvas');
         const spNote = media.querySelector('.ws-sp-note');
-        const source = (probe && probe.objectUrl) || full;
         if (source && spImg && spCanvas) {
           spImg.src = source;
           spBg.style.backgroundImage = `url("${source}")`;
@@ -501,6 +519,12 @@ export class WorkshopShop {
       content: media,
       // 宽度走 openModal 的 width（它设的是 max-width）；只改 el.style.width 会被 460px 上限截住
       width: 1120,
+      onClose: () => {
+        if (localObjectUrl) {
+          URL.revokeObjectURL(localObjectUrl);
+          localObjectUrl = '';
+        }
+      },
       actions: [
         {
           label: '订阅 + 应用到桌面',
@@ -594,6 +618,8 @@ export class WorkshopShop {
     const assets = await fetchPreviewAssets(item.id);
     const image = (assets && assets.image) || item.preview || '';
     const video = (assets && assets.video) || '';
+    // 本地库里有作者原图就记下来，背景引擎会优先用它（Steam 那份只有 1024）
+    const local = await getLocalWallpaper(item.id);
     await this.app.updateSettings({
       background: {
         type: 'we',
@@ -602,12 +628,17 @@ export class WorkshopShop {
         weTitle: item.title,
         weImage: image,
         weVideo: video,
+        weLocalMediaId: (local && local.mediaId) || '',
       },
     });
-    this.onToast(
-      video ? '已设为起始页背景' : '已设为起始页背景（方形预览按完整显示 + 虚化铺底呈现）',
-      'ok',
-    );
+    if (local) {
+      this.onToast(`已设为起始页背景（本地原图 ${local.width}×${local.height}）`, 'ok');
+    } else {
+      this.onToast(
+        video ? '已设为起始页背景' : '已设为起始页背景（方形预览按完整显示 + 虚化铺底呈现）',
+        'ok',
+      );
+    }
   }
 
   /** 加入每日轮换收藏池（去重）。 */

@@ -42,6 +42,8 @@ export const DEFAULT_SETTINGS = {
     weTitle: '',
     weImage: '', // 起始页背景用：静态预览图地址
     weVideo: '', // 起始页背景用：动态视频地址（webm，有值时优先）
+    // 本地壁纸库里该作者原图的媒体 id（有值时优先于 weImage —— Steam 只给 1024 压缩件）
+    weLocalMediaId: '',
     weFit: 'cover', // cover（填满裁切）| contain（完整显示，等比缩放留边）
     // 应用到桌面：Steam 的 workshop/content/431960 目录（按 <目录>\<壁纸ID>\project.json 定位）
     weWorkshopPath: 'C:\\Program Files (x86)\\Steam\\steamapps\\workshop\\content\\431960',

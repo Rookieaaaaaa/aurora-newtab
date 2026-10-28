@@ -2150,6 +2150,14 @@ body.ai-open .stage {
   transform: scale(1.04);
 }
 
+/* 本地壁纸库的操作按钮组 */
+.ws-local-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0;
+}
+
 /* 类型标记：视频类的预览件只有 192px 动图，标一句免得被当成加载失败 */
 .ws-kind {
   position: absolute;

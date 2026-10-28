@@ -20,6 +20,12 @@ import { testConnection as testDeepseekSearch } from './providers/deepseek-searc
 import { testConnection as testYuanbao } from './providers/yuanbao-mcp.js';
 import * as storage from './storage.js';
 import { debounce, deepMerge, describeError, getPath, hostOf, setPath } from './utils.js';
+import {
+  clearLocalLibrary,
+  loadLocalLibrary,
+  scanLocalLibrary,
+  summarizeLibrary,
+} from './we-local.js';
 import { fetchWallhavenList } from './wallhaven.js';
 import {
   getSteamSession,
@@ -237,6 +243,14 @@ export class SettingsDrawer {
               <div class="hint">工坊预览多为方形件（约 1024px）：直接铺满会裁掉大半且发糊，所以比例差距大时会自动按「完整显示 + 虚化铺底」呈现，画面不裁切、也不放大。</div>
             </div>
             <button class="btn ghost sm" type="button" data-role="we-browse">${icon('image')}浏览创意工坊，挑壁纸 / 订阅 / 设背景</button>
+            <div class="field">
+              <label>本地壁纸库（真实原图 / 完整视频）</label>
+              <div class="ws-local-actions">
+                <button class="btn sm" type="button" data-role="we-local-scan">${icon('upload')}选择 WE 工坊目录</button>
+                <button class="btn ghost sm" type="button" data-role="we-local-clear">${icon('trash')}清除</button>
+              </div>
+              <div class="hint" data-role="we-local-status">Steam 只给 1024 方形预览，但订阅过的壁纸在你硬盘上是完整原图与成片视频。选择 <code>...\\steamapps\\workshop\\content\\431960</code> 后，扩展会把原图收进本地库——之后工坊详情和起始页背景都用它。</div>
+            </div>
             <div class="field" data-role="we-current" hidden>
               <div class="hint" data-role="we-current-text"></div>
             </div>
@@ -753,6 +767,12 @@ export class SettingsDrawer {
     const weBrowseBtn = this.root.querySelector('[data-role="we-browse"]');
     if (weBrowseBtn) weBrowseBtn.addEventListener('click', () => this.weShop.open());
 
+    const weLocalScan = this.root.querySelector('[data-role="we-local-scan"]');
+    if (weLocalScan) weLocalScan.addEventListener('click', () => this.scanLocalWeLibrary(weLocalScan));
+
+    const weLocalClear = this.root.querySelector('[data-role="we-local-clear"]');
+    if (weLocalClear) weLocalClear.addEventListener('click', () => this.clearLocalWeLibrary());
+
     const weLoginBtn = this.root.querySelector('[data-role="we-login-btn"]');
     if (weLoginBtn) {
       weLoginBtn.addEventListener('click', () => {
@@ -1166,8 +1186,72 @@ export class SettingsDrawer {
   }
 
   /** 同步分段控件 / 卡片 / 面板显隐等派生状态。 */
+  /* ------------------------------ 本地 WE 壁纸库 ------------------------------ */
+
+  /** 渲染本地库状态。 */
+  async renderLocalWeStatus() {
+    const statusEl = this.root.querySelector('[data-role="we-local-status"]');
+    if (!statusEl) return;
+    const library = await loadLocalLibrary();
+    if (!library.count) {
+      statusEl.innerHTML =
+        '未导入本地壁纸库。Steam 只给 1024 方形预览，选到 <code>...\\steamapps\\workshop\\content\\431960</code> 可以把作者原图（实测最高 1431px）和成片视频收进来。';
+      return;
+    }
+    const summary = summarizeLibrary(library);
+    const when = library.scannedAt ? new Date(library.scannedAt).toLocaleString('zh-CN') : '';
+    const parts = [`已收录 ${summary.total} 张`];
+    if (summary.video) parts.push(`视频 ${summary.video}`);
+    if (summary.scene) parts.push(`场景 ${summary.scene}`);
+    if (summary.web) parts.push(`网页 ${summary.web}`);
+    if (summary.maxWidth) parts.push(`原图最高 ${summary.maxWidth}px`);
+    statusEl.textContent = `${parts.join(' · ')}（${library.dirName}，${when} 扫描）`;
+  }
+
+  /** 选择 WE 工坊目录并扫描入库。 */
+  async scanLocalWeLibrary(button) {
+    const statusEl = this.root.querySelector('[data-role="we-local-status"]');
+    const wasDisabled = button ? button.disabled : false;
+    if (button) button.disabled = true;
+    try {
+      const index = await scanLocalLibrary(({ done, total }) => {
+        if (statusEl) statusEl.textContent = `正在读取本地壁纸 ${done}/${total}…`;
+      });
+      const summary = summarizeLibrary(index);
+      if (statusEl) {
+        statusEl.textContent = `已收录 ${summary.total} 张（视频 ${summary.video} · 场景 ${summary.scene} · 网页 ${summary.web}），原图最高 ${summary.maxWidth}px`;
+      }
+      toast(`已导入 ${summary.total} 张本地壁纸`, 'ok');
+    } catch (err) {
+      // 用户点了取消：不算错误，恢复原状态
+      if (err && err.name === 'AbortError') {
+        await this.renderLocalWeStatus();
+        return;
+      }
+      if (statusEl) statusEl.textContent = `扫描失败：${describeError(err)}`;
+    } finally {
+      if (button) button.disabled = wasDisabled;
+    }
+  }
+
+  /** 清空本地库缓存（不动硬盘上的壁纸文件）。 */
+  async clearLocalWeLibrary() {
+    const ok = await confirmDialog({
+      title: '清除本地壁纸库',
+      message: '会删除扩展里缓存的预览图，不会动你硬盘上的壁纸文件。确定继续吗？',
+      confirmText: '清除',
+      danger: true,
+    });
+    if (!ok) return;
+    await clearLocalLibrary();
+    await this.renderLocalWeStatus();
+    toast('本地壁纸库已清除', 'ok');
+  }
+
   syncDerivedUi() {
     const settings = this.ensureView();
+    // 本地壁纸库状态是异步读的，不阻塞其余同步渲染
+    this.renderLocalWeStatus();
     const bgType = getPath(settings, 'background.type', 'bing');
     const provider = getPath(settings, 'ai.provider', 'yuanbao');
     const gradient = getPath(settings, 'background.gradient', 'forest');
