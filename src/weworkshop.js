@@ -74,6 +74,202 @@ function networkHint() {
   return '无法连接 Steam 创意工坊：请检查网络或代理（设置 → 壁纸库 → 专用代理，例如 127.0.0.1:7890），然后重试';
 }
 
+/* ---------------------------- 素材规格与标签解析 ---------------------------- */
+
+/** 条目类型标签 → 内部类型（Wallpaper Engine 的工坊分类）。 */
+const KIND_BY_TAG = { Video: 'video', Scene: 'scene', Web: 'web', Application: 'application' };
+
+/** 特性标签（决定壁纸的玩法，展示在详情里）。 */
+const FEATURE_TAGS = [
+  'Audio responsive',
+  'Puppet Warp',
+  'Customizable',
+  'Preset',
+  'Interactive',
+  'Audio',
+];
+
+/** 分级标签。 */
+const MATURITY_TAGS = ['Everyone', 'Questionable', 'Mature'];
+
+/** 纯噪声标签：没有信息量，不展示。 */
+const NOISE_TAGS = new Set(['Wallpaper', 'Unspecified']);
+
+/**
+ * 把工坊标签解析成结构化画像。
+ *
+ * Wallpaper Engine 的作者上传时会勾选一组标准标签，其中就包含
+ * 类型（Video/Scene/Web/Application）、原始分辨率（"3840 x 2160"、
+ * "Ultrawide 2560 x 1080"）、特性（Audio responsive 等）与分级。
+ * 这些是 Steam 唯一可靠暴露的素材规格——preview 图本身不含分辨率信息。
+ *
+ * @param {Array<{tag:string}|string>} tags
+ * @returns {{kind:string, resolution:{width:number,height:number,label:string}|null,
+ *            features:string[], maturity:string, styles:string[]}}
+ */
+export function parseWorkshopTags(tags) {
+  const list = (Array.isArray(tags) ? tags : [])
+    .map((tag) => (typeof tag === 'string' ? tag : tag && tag.tag))
+    .filter(Boolean);
+
+  let kind = '';
+  let resolution = null;
+  const features = [];
+  let maturity = '';
+  const styles = [];
+
+  for (const tag of list) {
+    if (KIND_BY_TAG[tag]) {
+      if (!kind) kind = KIND_BY_TAG[tag];
+      continue;
+    }
+    const dims = tag.match(/(\d{3,5})\s*[x×]\s*(\d{3,5})/);
+    if (dims) {
+      resolution = { width: Number(dims[1]), height: Number(dims[2]), label: tag };
+      continue;
+    }
+    if (/^other resolution$/i.test(tag)) {
+      resolution = { width: 0, height: 0, label: tag };
+      continue;
+    }
+    if (FEATURE_TAGS.includes(tag)) {
+      features.push(tag);
+      continue;
+    }
+    if (MATURITY_TAGS.includes(tag)) {
+      maturity = tag;
+      continue;
+    }
+    if (NOISE_TAGS.has(tag)) continue;
+    styles.push(tag);
+  }
+
+  return { kind, resolution, features, maturity, styles };
+}
+
+/** 类型的中文名。 */
+export const KIND_LABELS = {
+  video: '视频壁纸',
+  scene: '3D 场景',
+  web: '网页壁纸',
+  application: '应用壁纸',
+};
+
+/**
+ * 该壁纸在起始页里能被还原到什么程度。
+ *
+ * 起始页只有浏览器渲染能力，没有 Wallpaper Engine 运行时：能用的素材
+ * 只有 Steam 提供的预览件。所以这里给的是「素材能力的上限」而不是猜测。
+ *
+ * @param {{kind:string}} profile
+ * @returns {{level:'full'|'preview'|'none', title:string, detail:string}}
+ */
+export function startPageCapability(profile) {
+  const kind = (profile && profile.kind) || '';
+  if (kind === 'web' || kind === 'application') {
+    return {
+      level: 'none',
+      title: '无法在起始页展示',
+      detail: '这类壁纸依赖 Wallpaper Engine 运行时，起始页只能显示它的预览图，壁纸本身不会运行。',
+    };
+  }
+  if (kind === 'video') {
+    return {
+      level: 'preview',
+      title: '可展示静态预览',
+      detail: 'Steam 只提供低清动图和方形静态预览，起始页会用静态预览图铺满，动态效果需在 Wallpaper Engine 中查看。',
+    };
+  }
+  if (kind === 'scene') {
+    return {
+      level: 'preview',
+      title: '可展示静态预览',
+      detail: '3D 场景需 Wallpaper Engine 运行，起始页会用预览图作静态背景。',
+    };
+  }
+  return {
+    level: 'full',
+    title: '可在起始页展示',
+    detail: '起始页会用 Steam 提供的预览图铺满屏幕。',
+  };
+}
+
+/**
+ * 生成指定尺寸的 Steam 图像地址。
+ * CDN 的 imw/imh 必须配合 impolicy 才生效；方形预览按等比缩放不会产生黑边。
+ * @param {string} url 原始地址（可带参数）
+ * @param {number} size 目标边长（像素）
+ */
+export function steamThumbUrl(url, size) {
+  const base = stripSteamImageParams(url);
+  if (!base || !size) return base;
+  const query = new URLSearchParams({
+    ima: 'fit',
+    impolicy: 'Letterbox',
+    imcolor: '#000000',
+    imw: String(size),
+    imh: String(size),
+    letterbox: 'true',
+  });
+  return `${base}?${query}`;
+}
+
+/** 探测结果缓存：同一张图在一个会话里只探一次。 */
+const MEDIA_PROBE_CACHE = new Map();
+
+/**
+ * 探测预览素材的真实格式与像素尺寸。
+ *
+ * Steam 的 preview_url 指向的原图有两种：静态图（1024×1024 JPEG）和
+ * 动态图（约 192×192 GIF）。光看 URL 分不出来，只能取回 blob 看类型，
+ * GIF 直接读文件头拿尺寸，静态图用 createImageBitmap 解码。
+ *
+ * @param {string} url
+ * @returns {Promise<{url:string, objectUrl:string, format:'gif'|'image'|'unknown', animated:boolean,
+ *                    width:number, height:number, bytes:number}|null>}
+ */
+export async function probePreviewMedia(url) {
+  const bare = stripSteamImageParams(url);
+  if (!bare) return null;
+  if (MEDIA_PROBE_CACHE.has(bare)) return MEDIA_PROBE_CACHE.get(bare);
+
+  const task = (async () => {
+    try {
+      const response = await timedFetch(bare, BROWSE_TIMEOUT, { credentials: 'omit' });
+      if (!response.ok) return null;
+      const blob = await response.blob();
+      const type = blob.type || '';
+      let width = 0;
+      let height = 0;
+      if (type === 'image/gif') {
+        const head = new Uint8Array(await blob.slice(0, 10).arrayBuffer());
+        width = head[6] | (head[7] << 8);
+        height = head[8] | (head[9] << 8);
+      } else if (type.startsWith('image/') && typeof createImageBitmap === 'function') {
+        const bitmap = await createImageBitmap(blob);
+        width = bitmap.width;
+        height = bitmap.height;
+        bitmap.close();
+      }
+      return {
+        url: bare,
+        // 已经下载过就不再让浏览器取第二遍：直接给 img 用这个本地地址
+        objectUrl: typeof URL !== 'undefined' && URL.createObjectURL ? URL.createObjectURL(blob) : bare,
+        format: type === 'image/gif' ? 'gif' : type.startsWith('image/') ? 'image' : 'unknown',
+        animated: type === 'image/gif',
+        width,
+        height,
+        bytes: blob.size,
+      };
+    } catch (err) {
+      return null;
+    }
+  })();
+
+  MEDIA_PROBE_CACHE.set(bare, task);
+  return task;
+}
+
 /** 本地日期 key（轮换当日缓存用）。 */
 function localDateKey() {
   const now = new Date();
@@ -144,10 +340,11 @@ async function browseViaWeb({ query = '', sort = 'trending', tag = '', page = 1,
     const id = matched[1];
     if (byId.has(id)) continue;
     const card = anchor.closest('.workshopItemSubscription') || anchor.parentElement;
-    const img = card ? card.querySelector('img') : null;
-    let title = '';
+    const img = anchor.querySelector('img') || (card ? card.querySelector('img') : null);
+    // 新版浏览页的 class 名是构建哈希（每次发版都变），标题只稳定存在于 img 的 alt 上
+    let title = img && img.alt ? img.alt.trim() : '';
     const titleEl = card ? card.querySelector('.workshopItemSubscriptionTitle') : null;
-    if (titleEl) title = titleEl.textContent.trim();
+    if (!title && titleEl) title = titleEl.textContent.trim();
     if (!title && card) {
       for (const link of card.querySelectorAll('a')) {
         const text = link.textContent.trim();
@@ -160,7 +357,8 @@ async function browseViaWeb({ query = '', sort = 'trending', tag = '', page = 1,
     byId.set(id, {
       id,
       title: title || `壁纸 #${id}`,
-      preview: (img && (img.dataset.src || img.src)) || '',
+      // 列表自带的地址是 imw=322 的灰边缩略图，放大必糊；统一换成 480 的净图
+      preview: steamThumbUrl((img && (img.dataset.src || img.src)) || '', 480),
     });
   }
 
@@ -229,60 +427,28 @@ function stripSteamImageParams(url) {
 }
 
 /**
- * 从条目详情页抓预览素材：动态视频地址 + 原始预览图。
+ * 取条目的预览素材（原图地址 + 条目详情）。
  *
- * 注意 Steam 已把详情页换成前端渲染（React）——首屏 HTML 里不再有
- * #previewImage / <video> / og:image，直接抓详情页只会拿到空壳。
- * 但带 insideModal=1（旧版快捷弹窗）的地址仍返回服务器渲染的旧标记，
- * 预览图就在其中；workshop/filedetails 作为第二入口兜底。
- * 预览图是 Steam 的方形裁切件（约 1024×1024），去掉 imw/imh/impolicy
- * 等压缩参数后取到的就是原图。（是否方形由调用方判断并做完整显示处理。）
+ * 早先靠抓详情页 HTML 里的 #previewImage 拿图，但 Steam 已把详情页换成
+ * React 前端渲染，旧标记只在 insideModal 的兼容片段里还留着，且该片段
+ * 固定 bSkipVideos=true（永远没有视频），抓一次要试多个入口、极易触发 429。
+ *
+ * 实测结论：GetPublishedFileDetails 返回的 preview_url 去掉压缩参数后
+ * 就是原图（静态件 1024×1024 JPEG、动态件约 192×192 GIF），已没有更高清
+ * 的素材可用——所以这里直接走 API，一次请求拿到图与标签。
  *
  * @param {string} id
- * @returns {Promise<{video:string|null, image:string|null}|null>} 失败返回 null，调用方自行降级
+ * @returns {Promise<{video:null, image:string, detail:object|null}|null>} 拿不到图返回 null
  */
 export async function fetchPreviewAssets(id) {
-  const endpoints = [
-    `https://steamcommunity.com/sharedfiles/filedetails/?id=${id}&insideModal=1`,
-    `https://steamcommunity.com/workshop/filedetails/?id=${id}`,
-    `https://steamcommunity.com/sharedfiles/filedetails/?id=${id}`,
-  ];
-
-  for (let i = 0; i < endpoints.length; i += 1) {
-    try {
-      // 带 Steam 会话：年龄门控的壁纸登录后才能拿到真实的视频与预览图
-      const response = await timedFetch(endpoints[i], BROWSE_TIMEOUT, { credentials: 'include' });
-      if (!response.ok) continue;
-      const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
-
-      const videoEl = doc.querySelector('video');
-      const video =
-        ((videoEl && videoEl.querySelector('source[src]') && videoEl.querySelector('source[src]').src) ||
-          (videoEl && videoEl.getAttribute('src')) ||
-          null);
-
-      let image = '';
-      const mainImg = doc.querySelector(
-        '#previewImage, img.workshopItemPreviewImageMain, img.workshopItemPreviewImageEnlargeable',
-      );
-      if (mainImg && mainImg.src) image = mainImg.src;
-      if (!image && videoEl && videoEl.getAttribute('poster')) image = videoEl.getAttribute('poster');
-      if (!image) {
-        const og = doc.querySelector('meta[property="og:image"]');
-        if (og) image = og.getAttribute('content') || '';
-      }
-
-      if (video || image) {
-        return {
-          video: video ? stripSteamImageParams(video) : null,
-          image: image ? stripSteamImageParams(image) : null,
-        };
-      }
-    } catch (err) {
-      /* 换下一个入口 */
-    }
+  try {
+    const [detail] = await fetchDetails([String(id)]);
+    const image = detail && detail.preview_url;
+    if (!image) return null;
+    return { video: null, image: stripSteamImageParams(image), detail: detail || null };
+  } catch (err) {
+    return null;
   }
-  return null;
 }
 
 /**
@@ -399,8 +565,8 @@ export async function resolveWeBackground(bg) {
   const cache = await getRaw(STORAGE_KEYS.weCache).catch(() => null);
   const item = library[dayOfYear() % library.length];
 
-  // v3 = insideModal 旧版页面抓取方案；老缓存（低清缩略图 / 抓取失败结果）自动失效重抓
-  if (cache && cache.v === 3 && cache.date === today && cache.id === item.id) {
+  // v4 = 直接取 API 原图（preview_url 去参数），不再抓详情页 HTML
+  if (cache && cache.v === 4 && cache.date === today && cache.id === item.id) {
     return {
       image: stripSteamImageParams(cache.image || item.preview || ''),
       video: cache.video || null,
@@ -408,24 +574,16 @@ export async function resolveWeBackground(bg) {
     };
   }
 
-  // 抓视频 + 全尺寸截图（截图优先，视频分辨率不够时由背景引擎自适应取舍），
-  // 结果当日缓存，避免反复请求
-  const [assets, details] = await Promise.all([
-    fetchPreviewAssets(item.id),
-    fetchDetails([item.id]).catch(() => [null]),
-  ]);
-  const image =
-    (assets && assets.image) ||
-    (details[0] && details[0].preview_url) ||
-    item.preview ||
-    '';
-  const video = (assets && assets.video) || null;
+  // Steam 没有比 preview_url 原图更好的素材了：一次 API 请求即可，结果当日缓存
+  const [detail] = await fetchDetails([item.id]).catch(() => [null]);
+  const image = (detail && detail.preview_url) || item.preview || '';
+  const video = null;
   await setRaw(STORAGE_KEYS.weCache, {
-    v: 3,
+    v: 4,
     date: today,
     id: item.id,
     image: stripSteamImageParams(image),
-    video: video || '',
+    video: '',
   }).catch(() => false);
   if (!image && !video) throw new Error('工坊壁纸信息获取失败（网络或代理问题）');
   return { image: stripSteamImageParams(image), video, item };

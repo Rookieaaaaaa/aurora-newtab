@@ -1575,31 +1575,307 @@ body.ai-open .stage {
 /* WE 工坊：详情弹窗里的预览媒体。
    自适应画布：媒体按原始比例完整落入容器，小图不再被强制拉满放大（低清缩略图
    不会被拉成模糊大图），全尺寸截图/视频也不会超出弹窗与视口高度。 */
-.ws-detail-media {
+/* ---------- 壁纸工坊：详情（左预览 / 右规格） ---------- */
+.ws-detail {
   display: grid;
-  place-items: center;
-  min-height: 200px;
-  border-radius: 14px;
-  background: rgba(4, 7, 14, 0.55);
-  overflow: hidden;
+  grid-template-columns: minmax(0, 1fr) 292px;
+  gap: 20px;
+  align-items: start;
+  width: 100%;
+  padding: 4px 0 10px;
 }
 
-.ws-detail-media img,
-.ws-detail-media video {
+.ws-detail-stage {
+  min-width: 0;
+}
+
+.ws-detail-frame {
+  display: grid;
+  place-items: center;
+  /* 画框贴合素材本身，方形件不会拖出一条空荡的长条 */
+  width: fit-content;
+  max-width: 100%;
+  min-height: 180px;
+  margin: 0 auto;
+  padding: 10px;
+  border: 1px solid var(--panel-line);
+  border-radius: 16px;
+  background: radial-gradient(120% 100% at 50% 0%, rgba(116, 199, 255, 0.07), transparent 62%),
+    rgba(4, 7, 14, 0.62);
+}
+
+/* 按素材真实比例完整显示：方形件就是方形，不塞进固定画框，也不放大 */
+.ws-detail-img {
   display: block;
   width: auto;
   height: auto;
   max-width: 100%;
-  max-height: 56vh;
-  border-radius: 14px;
+  max-height: min(54vh, 508px);
+  border-radius: 10px;
+  object-fit: contain;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.48);
+}
+
+/* 视频类的预览件只有 192px 见方：放大到可辨认的尺寸，宁可略糊也别小成指甲盖。
+   注意用固定宽度——外层画框是 fit-content，百分比宽度在这里算不出来 */
+.ws-detail-img.is-lowres {
+  width: 430px;
+  height: 430px;
+  max-width: none;
+  max-height: none;
+}
+
+@media (max-width: 720px) {
+  .ws-detail-img.is-lowres {
+    width: 100%;
+    height: auto;
+    max-width: 100%;
+    max-height: 44vh;
+  }
+}
+
+.ws-detail-caption {
+  margin-top: 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.ws-detail-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.ws-detail-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--ink);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ws-detail-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ws-chip {
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.ws-chip-kind {
+  color: #79f0cd;
+  background: rgba(111, 242, 200, 0.1);
+  border-color: rgba(111, 242, 200, 0.24);
+}
+
+.ws-chip-res {
+  color: #9ed4ff;
+  background: rgba(116, 199, 255, 0.1);
+  border-color: rgba(116, 199, 255, 0.24);
+  font-variant-numeric: tabular-nums;
+}
+
+.ws-chip-warn {
+  color: #ffb27a;
+  background: rgba(255, 160, 90, 0.1);
+  border-color: rgba(255, 160, 90, 0.26);
+}
+
+.ws-chip-muted {
+  color: var(--ink-3);
+  border-color: var(--panel-line);
+}
+
+.ws-features {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+.ws-feature-label {
+  color: var(--ink-3);
+  margin-right: 2px;
+}
+
+.ws-feature {
+  padding: 2px 8px;
+  border: 1px solid var(--panel-line);
+  border-radius: 7px;
+  color: var(--ink-2);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+/* 起始页能力：能还原到什么程度，一眼看清 */
+.ws-detail-cap {
+  display: flex;
+  gap: 9px;
+  padding: 10px 11px;
+  border: 1px solid var(--panel-line);
+  border-radius: 11px;
+  font-size: 12px;
+  line-height: 1.55;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.ws-cap-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+
+.ws-cap-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ws-cap-body b {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.ws-cap-body i {
+  font-style: normal;
+  color: var(--ink-3);
+}
+
+.ws-detail-cap.is-full {
+  border-color: rgba(111, 242, 200, 0.22);
+  background: rgba(111, 242, 200, 0.055);
+}
+
+.ws-detail-cap.is-full .ws-cap-dot {
+  background: #6ff2c8;
+  box-shadow: 0 0 9px rgba(111, 242, 200, 0.65);
+}
+
+.ws-detail-cap.is-preview {
+  border-color: rgba(116, 199, 255, 0.22);
+  background: rgba(116, 199, 255, 0.055);
+}
+
+.ws-detail-cap.is-preview .ws-cap-dot {
+  background: #74c7ff;
+  box-shadow: 0 0 9px rgba(116, 199, 255, 0.6);
+}
+
+.ws-detail-cap.is-none {
+  border-color: rgba(255, 171, 107, 0.24);
+  background: rgba(255, 171, 107, 0.06);
+}
+
+.ws-detail-cap.is-none .ws-cap-dot {
+  background: #ffab6b;
+  box-shadow: 0 0 9px rgba(255, 171, 107, 0.55);
+}
+
+.ws-detail-stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  margin: 0;
+  padding-top: 11px;
+  border-top: 1px solid var(--panel-line);
+  font-size: 12.5px;
+}
+
+.ws-detail-stats dt {
+  color: var(--ink-3);
+}
+
+.ws-detail-stats dd {
+  margin: 0;
+  color: var(--ink);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ws-detail-id {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  opacity: 0.72;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 起始页效果预览：把方形素材按当前显示方式落到 16:9 画布上 */
+.ws-startpage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ws-sp-canvas {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+  background: #05070d;
+}
+
+.ws-sp-bg {
+  position: absolute;
+  inset: 0;
+  background-position: center;
+  background-size: cover;
+  filter: blur(16px) brightness(0.58) saturate(1.1);
+  transform: scale(1.16);
+  opacity: 0;
+  transition: opacity var(--t-fast, 140ms);
+}
+
+.ws-sp-canvas.is-contain .ws-sp-bg {
+  opacity: 1;
+}
+
+.ws-sp-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ws-sp-canvas.is-contain .ws-sp-img {
   object-fit: contain;
 }
 
-.ws-detail-meta {
-  margin-top: 10px;
-  font-size: 12.5px;
-  color: var(--ink-3, #6d7890);
+.ws-sp-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-3);
   text-align: center;
+}
+
+@media (max-width: 900px) {
+  .ws-detail {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .ws-detail-img {
+    max-height: 44vh;
+  }
 }
 
 /* ---------- 壁纸工坊：全屏浏览页 ---------- */
@@ -1837,14 +2113,15 @@ body.ai-open .stage {
 
 .ws-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(252px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
   gap: 14px;
   padding: 2px;
 }
 
 .ws-card {
   position: relative;
-  aspect-ratio: 16 / 10;
+  /* 工坊预览件基本是方形，16:10 的卡片会把上下裁掉近四成，方形卡才是不裁切地显示 */
+  aspect-ratio: 1 / 1;
   padding: 0;
   border: 1px solid var(--panel-line);
   border-radius: 14px;
@@ -1871,6 +2148,39 @@ body.ai-open .stage {
 
 .ws-card:hover .ws-img {
   transform: scale(1.04);
+}
+
+/* 类型标记：视频类的预览件只有 192px 动图，标一句免得被当成加载失败 */
+.ws-kind {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 2px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: #fff;
+  background: rgba(6, 10, 18, 0.62);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+
+.ws-kind-video {
+  color: #9fe8ff;
+  border-color: rgba(116, 199, 255, 0.35);
+}
+
+.ws-kind-scene {
+  color: #a9ffdc;
+  border-color: rgba(111, 242, 200, 0.32);
+}
+
+.ws-kind-web,
+.ws-kind-application {
+  color: #ffcf9e;
+  border-color: rgba(255, 176, 106, 0.34);
 }
 
 .ws-info {

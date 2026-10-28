@@ -9,6 +9,7 @@ import { openModal, toast } from './dialog.js';
 import { icon } from './icons.js';
 import { describeError, getPath } from './utils.js';
 import {
+  KIND_LABELS,
   WE_SORTS,
   WE_TAGS,
   browseWorkshop,
@@ -17,10 +18,33 @@ import {
   fetchPreviewAssets,
   getSteamSession,
   loadWeLibrary,
+  parseWorkshopTags,
+  probePreviewMedia,
   saveWeLibrary,
+  startPageCapability,
   subscribeItem,
   unsubscribeItem,
 } from './weworkshop.js';
+
+/**
+ * 一句话说明这张预览素材到底是什么规格。
+ * 关键在于如实区分「预览件」和「壁纸本体」——两者常被用户混为一谈。
+ * @param {{width:number,height:number,animated:boolean}|null} probe
+ * @param {{resolution:{label:string}|null}} profile
+ */
+function describePreviewMedia(probe, profile) {
+  const target = profile && profile.resolution ? profile.resolution.label : '';
+  const parts = [];
+  if (!probe) {
+    parts.push('预览素材未解析');
+  } else if (probe.animated) {
+    parts.push(`动态预览 ${probe.width}×${probe.height}（Steam 只给低清动图）`);
+  } else if (probe.width) {
+    parts.push(`预览图 ${probe.width}×${probe.height}`);
+  }
+  if (target) parts.push(`壁纸本体 ${target}`);
+  return parts.join(' · ');
+}
 
 export class WorkshopShop {
   /**
@@ -251,6 +275,7 @@ export class WorkshopShop {
       result.items.forEach((item) => grid.appendChild(this.buildCard(item)));
       if (result.items.length) {
         statusEl.hidden = true;
+        this.annotateKinds(grid, result.items);
       } else if (this.state.page > 1) {
         statusEl.textContent = '没有更多了';
         this.state.hasNext = false;
@@ -280,11 +305,41 @@ export class WorkshopShop {
     }
   }
 
+  /**
+   * 批量补上类型标记（视频 / 3D 场景 / 网页…）。
+   *
+   * 视频类的预览件只是 192px 的动图，放大到卡片尺寸必然发虚——不标一句
+   * 很容易被当成「加载失败」。标签只能靠详情接口拿，所以一次批量请求补齐。
+   */
+  annotateKinds(grid, items) {
+    fetchDetails(items.map((item) => item.id))
+      .then((list) => {
+        for (const detail of list) {
+          if (!detail || !detail.publishedfileid) continue;
+          const profile = parseWorkshopTags(detail.tags);
+          if (!profile.kind) continue;
+          const card = grid.querySelector(`[data-id="${detail.publishedfileid}"]`);
+          if (!card || card.querySelector('.ws-kind')) continue;
+          const badge = document.createElement('span');
+          badge.className = `ws-kind ws-kind-${profile.kind}`;
+          badge.textContent = KIND_LABELS[profile.kind] || profile.kind;
+          card.appendChild(badge);
+          if (profile.resolution) {
+            card.title = `${detail.title || ''} · ${profile.resolution.label}`;
+          }
+        }
+      })
+      .catch(() => {
+        /* 类型标记是锦上添花，拿不到不影响浏览 */
+      });
+  }
+
   /** 构造单张壁纸卡片（大图 + 常显标题）。 */
   buildCard(item) {
     const card = document.createElement('button');
     card.type = 'button';
     card.className = 'ws-card';
+    card.dataset.id = item.id;
     card.title = `${item.title}（#${item.id}）`;
     card.innerHTML = `
       <img class="ws-img" loading="lazy" alt="" referrerpolicy="no-referrer" />
@@ -298,59 +353,154 @@ export class WorkshopShop {
 
   /* ------------------------------ 详情 ------------------------------ */
 
-  /** 详情弹窗：动态视频预览 + 操作。 */
+  /** 详情弹窗：左侧按素材真实比例预览，右侧给出类型/分辨率/效果与起始页能力。 */
   openDetail(item) {
     const media = document.createElement('div');
     media.className = 'ws-detail';
     media.innerHTML = `
-      <div class="ws-detail-media"><img alt="壁纸预览" referrerpolicy="no-referrer" /></div>
-      <div class="ws-detail-meta">正在加载详情…</div>
+      <div class="ws-detail-stage">
+        <div class="ws-detail-frame">
+          <img class="ws-detail-img" alt="壁纸预览" referrerpolicy="no-referrer" />
+        </div>
+        <div class="ws-detail-caption">预览素材加载中…</div>
+      </div>
+      <aside class="ws-detail-side">
+        <h3 class="ws-detail-title"></h3>
+        <div class="ws-detail-chips"></div>
+        <div class="ws-detail-cap"></div>
+        <dl class="ws-detail-stats"></dl>
+        <div class="ws-startpage">
+          <div class="ws-sp-canvas">
+            <div class="ws-sp-bg" aria-hidden="true"></div>
+            <img class="ws-sp-img" alt="起始页效果预览" referrerpolicy="no-referrer" />
+          </div>
+          <div class="ws-sp-note"></div>
+        </div>
+        <div class="ws-detail-id"></div>
+      </aside>
     `;
-    media.querySelector('img').src = item.preview;
 
-    // 静帧缩略图先显示，异步升级：有动态视频换视频，没有则换全尺寸截图
-    fetchPreviewAssets(item.id).then((assets) => {
-      if (!assets || !document.body.contains(media)) return;
-      const mediaBox = media.querySelector('.ws-detail-media');
-      if (!mediaBox) return;
-      if (assets.video) {
-        const video = document.createElement('video');
-        video.autoplay = true;
-        video.loop = true;
-        video.muted = true;
-        video.playsInline = true;
-        video.setAttribute('playsinline', '');
-        video.setAttribute('muted', '');
-        video.src = assets.video;
-        const img = mediaBox.querySelector('img');
-        if (img) img.replaceWith(video);
-      } else if (assets.image) {
-        const img = mediaBox.querySelector('img');
-        if (img) img.src = assets.image;
-      }
-    });
+    const img = media.querySelector('.ws-detail-img');
+    const captionEl = media.querySelector('.ws-detail-caption');
+    const chipsEl = media.querySelector('.ws-detail-chips');
+    const capEl = media.querySelector('.ws-detail-cap');
 
-    // 详情数据
-    fetchDetails([item.id])
-      .then(([detail]) => {
-        if (!detail || !document.body.contains(media)) return;
-        const subs = Number(detail.subscriptions) || 0;
-        const favs = Number(detail.favorites) || 0;
-        const sizeMb = detail.file_size ? (detail.file_size / 1024 / 1024).toFixed(1) : '?';
-        const updated = detail.time_updated
-          ? new Date(detail.time_updated * 1000).toLocaleDateString('zh-CN')
-          : '?';
-        media.querySelector('.ws-detail-meta').textContent =
-          `${detail.title || item.title} · 订阅 ${subs.toLocaleString('zh-CN')} · 收藏 ${favs.toLocaleString('zh-CN')} · ${sizeMb} MB · 更新 ${updated}`;
+    media.querySelector('.ws-detail-title').textContent = item.title;
+    media.querySelector('.ws-detail-id').textContent = `创意工坊 #${item.id}`;
+    img.src = item.preview || '';
+
+    // 列表缩略图先顶上，再补全规格——网络慢也不至于整块空白
+    fetchPreviewAssets(item.id)
+      .then(async (assets) => {
+        if (!document.body.contains(media)) return;
+        const detail = (assets && assets.detail) || null;
+        const profile = parseWorkshopTags(detail && detail.tags);
+
+        // 徽章：类型 / 壁纸本体分辨率 / 分级
+        chipsEl.replaceChildren();
+        const addChip = (text, tone) => {
+          const chip = document.createElement('span');
+          chip.className = `ws-chip ws-chip-${tone}`;
+          chip.textContent = text;
+          chipsEl.appendChild(chip);
+        };
+        if (profile.kind) addChip(KIND_LABELS[profile.kind] || profile.kind, 'kind');
+        if (profile.resolution) addChip(profile.resolution.label, 'res');
+        else addChip('分辨率未标注', 'muted');
+        if (profile.maturity && profile.maturity !== 'Everyone') addChip(profile.maturity, 'warn');
+
+        // 效果：音频响应 / 木偶变形 / 可自定义等
+        if (profile.features.length) {
+          const row = document.createElement('div');
+          row.className = 'ws-features';
+          const labelEl = document.createElement('span');
+          labelEl.className = 'ws-feature-label';
+          labelEl.textContent = '效果';
+          row.appendChild(labelEl);
+          profile.features.forEach((name) => {
+            const tag = document.createElement('span');
+            tag.className = 'ws-feature';
+            tag.textContent = name;
+            row.appendChild(tag);
+          });
+          chipsEl.after(row);
+        }
+
+        // 起始页能力：说清楚「能还原到什么程度」
+        const capability = startPageCapability(profile);
+        capEl.className = `ws-detail-cap is-${capability.level}`;
+        capEl.innerHTML =
+          '<span class="ws-cap-dot"></span><span class="ws-cap-body"><b></b><i></i></span>';
+        capEl.querySelector('b').textContent = capability.title;
+        capEl.querySelector('i').textContent = capability.detail;
+
+        // 统计
+        const subs = Number(detail && detail.subscriptions) || 0;
+        const favs = Number(detail && detail.favorited) || 0;
+        const sizeMb = detail && detail.file_size ? (detail.file_size / 1024 / 1024).toFixed(1) : '?';
+        const updated =
+          detail && detail.time_updated
+            ? new Date(detail.time_updated * 1000).toLocaleDateString('zh-CN')
+            : '?';
+        const statsEl = media.querySelector('.ws-detail-stats');
+        statsEl.replaceChildren();
+        [
+          ['订阅', subs.toLocaleString('zh-CN')],
+          ['收藏', favs.toLocaleString('zh-CN')],
+          ['文件大小', `${sizeMb} MB`],
+          ['最近更新', updated],
+        ].forEach(([label, value]) => {
+          const dt = document.createElement('dt');
+          dt.textContent = label;
+          const dd = document.createElement('dd');
+          dd.textContent = value;
+          statsEl.append(dt, dd);
+        });
+
+        // 预览素材：换成原图，并如实标出这张预览到底是多少像素
+        const full = (assets && assets.image) || item.preview;
+        const probe = await probePreviewMedia(full);
+        if (!document.body.contains(media)) return;
+        if (probe && probe.objectUrl) img.src = probe.objectUrl;
+        else if (full) img.src = full;
+        // 视频类的预览件只有 192px，按容器放大到可辨认的尺寸（会略糊，但总好过指甲盖大小）
+        if (probe && probe.width && probe.width < 640) img.classList.add('is-lowres');
+        else img.classList.remove('is-lowres');
+        captionEl.textContent = describePreviewMedia(probe, profile);
+
+        // 起始页效果：按当前显示方式先模拟一遍，方形素材铺到屏幕上到底什么样
+        const spImg = media.querySelector('.ws-sp-img');
+        const spBg = media.querySelector('.ws-sp-bg');
+        const spCanvas = media.querySelector('.ws-sp-canvas');
+        const spNote = media.querySelector('.ws-sp-note');
+        const source = (probe && probe.objectUrl) || full;
+        if (source && spImg && spCanvas) {
+          spImg.src = source;
+          spBg.style.backgroundImage = `url("${source}")`;
+          const background = this.app.getSettings().background || {};
+          const weFit = background.weFit || 'cover';
+          // 与背景引擎同一套判定：contain，或比例差 >15% 时改用「完整显示 + 虚化铺底」
+          const screenRatio = (window.innerWidth || 1280) / (window.innerHeight || 720);
+          const mediaRatio = probe && probe.width && probe.height ? probe.width / probe.height : screenRatio;
+          const ratioGap = Math.abs(mediaRatio - screenRatio) / screenRatio;
+          const useContain = weFit === 'contain' || ratioGap > 0.15;
+          spCanvas.classList.toggle('is-contain', useContain);
+          spNote.textContent = useContain
+            ? '起始页效果：完整显示 + 同图虚化铺底'
+            : '起始页效果：铺满屏幕（两侧会被裁切）';
+        }
       })
       .catch(() => {
-        const metaEl = media.querySelector('.ws-detail-meta');
-        if (metaEl && document.body.contains(media)) metaEl.textContent = item.title;
+        if (document.body.contains(media)) {
+          captionEl.textContent = '预览素材获取失败，当前显示的是列表缩略图';
+        }
       });
 
     openModal({
       title: '壁纸详情',
       content: media,
+      // 宽度走 openModal 的 width（它设的是 max-width）；只改 el.style.width 会被 460px 上限截住
+      width: 1120,
       actions: [
         {
           label: '订阅 + 应用到桌面',
@@ -399,7 +549,7 @@ export class WorkshopShop {
           },
         },
       ],
-    }).el.style.width = 'min(1100px, 96vw)';
+    }).el.style.width = 'min(1120px, 96vw)';
   }
 
   /** 订阅并（可选）延时应用到桌面 Wallpaper Engine。 */
@@ -440,12 +590,9 @@ export class WorkshopShop {
   /** 设为起始页背景：记录全尺寸截图 + 动态视频，背景引擎会按屏幕分辨率自适应取舍。 */
   async applyBackground(item) {
     this.onToast('正在获取壁纸素材…', 'ok');
-    const [assets, details] = await Promise.all([
-      fetchPreviewAssets(item.id),
-      fetchDetails([item.id]).catch(() => []),
-    ]);
-    const image =
-      (assets && assets.image) || (details[0] && details[0].preview_url) || item.preview || '';
+    // fetchPreviewAssets 内部已经走一次详情接口并带出 preview_url，不必再单独请求
+    const assets = await fetchPreviewAssets(item.id);
+    const image = (assets && assets.image) || item.preview || '';
     const video = (assets && assets.video) || '';
     await this.app.updateSettings({
       background: {
