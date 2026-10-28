@@ -1,8 +1,9 @@
 /**
- * proxy.js — 壁纸库专用代理（chrome.proxy + PAC）
+ * proxy.js — 壁纸素材专用代理（chrome.proxy + PAC）
  *
- * 作用：把 wallhaven.cc 及其子域名的流量指到用户填写的本地代理（如 Clash 的 127.0.0.1:7890），
- * 其它所有网站保持直连。这样即使没开「系统代理」，只要代理程序在跑，壁纸库就能用。
+ * 作用：把 wallhaven.cc 与 Steam（创意工坊 / 图片 CDN）的流量指到用户填写的本地代理
+ * （如 Clash 的 127.0.0.1:7890），其它网站保持直连。这样即使没开「系统代理」，
+ * 只要代理程序在跑，壁纸库和工坊就都能用。
  *
  * 注意：
  * - chrome.proxy 是浏览器级配置，扩展设置后优先于系统代理；
@@ -12,8 +13,11 @@
 
 import { buildWallhavenPac, normalizeProxyAddr } from './defaults.js';
 
-/** 记录当前已应用的代理地址，避免重复 set/clear。 */
-let appliedAddr = null;
+/** PAC 内容版本：脚本规则变更时 +1，保证老用户重载后也能拿到新规则。 */
+const PAC_VERSION = 2;
+
+/** 记录当前已应用的「地址 + 规则版本」，避免重复 set/clear。 */
+let appliedKey = null;
 
 /** chrome.proxy 是否可用。 */
 function proxyApi() {
@@ -41,11 +45,12 @@ export function syncWallhavenProxy(rawAddr) {
     console.warn('[proxy] 壁纸库代理地址格式不正确，已忽略：', rawAddr);
   }
 
-  if (addr === appliedAddr) return; // 无变化
+  const key = `${addr}|${PAC_VERSION}`;
+  if (key === appliedKey) return; // 无变化
 
   if (!addr) {
-    if (appliedAddr !== null) {
-      appliedAddr = null;
+    if (appliedKey !== null) {
+      appliedKey = null;
       try {
         api.settings.clear({ scope: 'regular' }, () => void chrome.runtime.lastError);
       } catch (err) {
@@ -65,8 +70,8 @@ export function syncWallhavenProxy(rawAddr) {
       },
       () => void chrome.runtime.lastError,
     );
-    appliedAddr = addr;
-    console.info('[proxy] 壁纸库已走专用代理：', addr);
+    appliedKey = key;
+    console.info('[proxy] 壁纸库 / 工坊已走专用代理：', addr);
   } catch (err) {
     console.warn('[proxy] 代理配置应用失败', err);
   }
@@ -74,5 +79,5 @@ export function syncWallhavenProxy(rawAddr) {
 
 /** 仅供测试：重置内部状态。 */
 export function resetProxyStateForTest() {
-  appliedAddr = null;
+  appliedKey = null;
 }

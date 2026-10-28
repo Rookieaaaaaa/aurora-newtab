@@ -268,6 +268,13 @@ export class WorkshopShop {
     } catch (err) {
       statusEl.hidden = false;
       statusEl.textContent = `加载失败：${describeError(err)}`;
+      // 出错时直接给下一步：一键重试，不用关掉面板重进
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'ws-retry';
+      retry.textContent = '重试';
+      retry.addEventListener('click', () => this.load(true));
+      statusEl.appendChild(retry);
     } finally {
       this.state.loading = false;
     }

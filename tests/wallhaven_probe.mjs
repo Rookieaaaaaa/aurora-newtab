@@ -265,9 +265,14 @@ if (!fatal) {
     return 'ok';
   });
 
-  check('PAC 脚本：仅 wallhaven 域名走代理，其余直连', () => {
+  check('PAC 脚本：wallhaven + Steam 域名走代理，其余直连', () => {
     const pac = defaults.buildWallhavenPac('127.0.0.1:7890');
-    if (!pac.includes('dnsDomainIs(host, "wallhaven.cc")')) throw new Error('缺少域名匹配');
+    if (!pac.includes('dnsDomainIs(host, "wallhaven.cc")')) throw new Error('缺少 wallhaven 匹配');
+    ['steamcommunity.com', 'steampowered.com', 'steamstatic.com', 'steamusercontent.com'].forEach(
+      (domain) => {
+        if (!pac.includes(`"${domain}"`)) throw new Error(`缺少 Steam 域名匹配：${domain}`);
+      },
+    );
     if (!pac.includes('"PROXY 127.0.0.1:7890"')) throw new Error('缺少代理指令');
     if (!pac.includes('"DIRECT"')) throw new Error('缺少直连兜底');
     eq(defaults.buildWallhavenPac('bad addr'), '', '非法地址返回空脚本');

@@ -1908,6 +1908,25 @@ body.ai-open .stage {
   text-align: center;
   color: var(--ink-3);
   font-size: 13px;
+  line-height: 1.7;
+}
+
+.ws-retry {
+  margin-left: 8px;
+  height: 27px;
+  padding: 0 13px;
+  border-radius: 999px;
+  border: 1px solid var(--glass-line);
+  background: var(--glass);
+  color: var(--ink);
+  font-size: 12px;
+  vertical-align: 1px;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+
+.ws-retry:hover {
+  background: var(--glass-strong);
+  border-color: rgba(127, 227, 201, 0.5);
 }
 
 /* 底部翻页 */

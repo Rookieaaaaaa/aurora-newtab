@@ -404,7 +404,19 @@ export function normalizeProxyAddr(raw) {
 }
 
 /**
- * 生成壁纸库专用 PAC 脚本：仅 wallhaven 域名走指定代理，其余直连（纯函数，便于测试）。
+ * 生成壁纸素材专用 PAC 脚本：wallhaven 与 Steam（创意工坊）域名走指定代理，其余直连
+ * （纯函数，便于测试）。
+ *
+ * 为什么必须包含 Steam：chrome.proxy 设置的是浏览器级 PAC，会覆盖系统代理。
+ * 早先只放行 wallhaven.cc，导致开了专用代理后 Steam 反而被强制直连，
+ * 创意工坊就会报「网络异常 / 跨域」。这里把工坊相关域名一并纳入。
+ *
+ * 域名覆盖：
+ * - wallhaven.cc：壁纸库
+ * - steamcommunity.com：工坊浏览页 / 详情页 / 订阅接口
+ * - steampowered.com：api.steampowered.com 详情接口
+ * - steamstatic.com：cdn/shared/community/video.akamai.steamstatic.com 静态素材
+ * - steamusercontent.com：images.steamusercontent.com 预览图
  * @param {string} addr 已归一化的 host:port
  * @returns {string}
  */
@@ -414,6 +426,10 @@ export function buildWallhavenPac(addr) {
   return [
     'function FindProxyForURL(url, host) {',
     '  if (dnsDomainIs(host, "wallhaven.cc")) {',
+    `    return "PROXY ${target}";`,
+    '  }',
+    '  if (dnsDomainIs(host, "steamcommunity.com") || dnsDomainIs(host, "steampowered.com")',
+    '      || dnsDomainIs(host, "steamstatic.com") || dnsDomainIs(host, "steamusercontent.com")) {',
     `    return "PROXY ${target}";`,
     '  }',
     '  return "DIRECT";',

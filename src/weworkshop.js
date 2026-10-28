@@ -63,6 +63,17 @@ function timedFetch(url, timeout, options = {}) {
   );
 }
 
+/**
+ * 网络层失败（fetch 直接抛错）时的可操作提示。
+ * 浏览器预览没有扩展的跨域豁免，必然失败，要明确区分开，避免误导去改代理。
+ */
+function networkHint() {
+  if (!inExtension()) {
+    return '无法连接 Steam：普通浏览器预览会被跨域拦截，请把扩展加载到 Chrome（chrome://extensions）后再试';
+  }
+  return '无法连接 Steam 创意工坊：请检查网络或代理（设置 → 壁纸库 → 专用代理，例如 127.0.0.1:7890），然后重试';
+}
+
 /** 本地日期 key（轮换当日缓存用）。 */
 function localDateKey() {
   const now = new Date();
@@ -107,10 +118,22 @@ async function browseViaWeb({ query = '', sort = 'trending', tag = '', page = 1,
 
   // 带 Steam 会话：登录后列表与官网所见一致（含成人内容偏好与语言偏好）；
   // 未登录时没有登录 cookie，效果与匿名一致
-  const response = await timedFetch(`https://steamcommunity.com/workshop/browse/?${params}`, BROWSE_TIMEOUT, {
-    credentials: 'include',
-  });
-  if (!response.ok) throw new Error(`创意工坊返回 HTTP ${response.status}`);
+  let response;
+  try {
+    response = await timedFetch(
+      `https://steamcommunity.com/workshop/browse/?${params}`,
+      BROWSE_TIMEOUT,
+      { credentials: 'include' },
+    );
+  } catch (err) {
+    throw new Error(networkHint());
+  }
+  if (!response.ok) {
+    if (response.status === 429) {
+      throw new Error('Steam 提示请求过于频繁（429），请稍等一两分钟再试');
+    }
+    throw new Error(`创意工坊返回 HTTP ${response.status}`);
+  }
   const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
 
   // 宽松解析：凡指向 filedetails 的链接都算一个条目，按 id 去重，对改版更鲁棒
@@ -296,12 +319,17 @@ async function postSubscriptionAction(id, kind) {
     throw error;
   }
   const body = new URLSearchParams({ appid: String(WE_APPID), id, sessionid });
-  const response = await fetch(`https://steamcommunity.com/sharedfiles/${kind}`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-    body: body.toString(),
-  });
+  let response;
+  try {
+    response = await fetch(`https://steamcommunity.com/sharedfiles/${kind}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+      body: body.toString(),
+    });
+  } catch (err) {
+    throw new Error(networkHint());
+  }
   if (!response.ok) throw new Error(`${kind === 'subscribe' ? '订阅' : '退订'}接口返回 HTTP ${response.status}`);
   const data = await response.json().catch(() => ({}));
   if (data.success !== 1) throw new Error(data.error || '操作失败，请重试');

@@ -202,7 +202,7 @@ export class SettingsDrawer {
             <div class="field">
               <label for="set-wh-proxy">专用代理（可选）</label>
               <input id="set-wh-proxy" class="input" type="text" data-path="background.wallhavenProxy" placeholder="127.0.0.1:7890" />
-              <div class="hint">填写本地代理端口（Clash 默认 <b>127.0.0.1:7890</b>）后，仅 wallhaven 的流量走代理、其它网站不受影响，无需常开系统代理。留空则不接管。<b>注意：</b>开启期间浏览器的代理设置由本扩展接管（其它网站直连）；若你依赖系统代理访问其它网站，请改用系统代理并留空此项。</div>
+              <div class="hint">填写本地代理端口（Clash 默认 <b>127.0.0.1:7890</b>）后，仅 <b>wallhaven 与 Steam（壁纸工坊）</b>的流量走代理、其它网站不受影响，无需常开系统代理。留空则不接管。<b>注意：</b>开启期间浏览器的代理设置由本扩展接管（其它网站直连）；若你依赖系统代理访问其它网站，请改用系统代理并留空此项。</div>
             </div>
             <div class="row">
               <div class="row-text">
