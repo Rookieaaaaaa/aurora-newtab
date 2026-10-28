@@ -705,7 +705,32 @@ export class BackgroundController {
         };
       };
 
+      // 比例差过大时（Steam 的工坊预览是方形件），cover 会把画面裁得只剩中间一条。
+      // 改用「完整显示 + 同图虚化铺底」：画布任意尺寸都能填满，画面不裁切、不放大。
+      const composeLayer = (img) => {
+        const box = document.createElement('div');
+        box.className = 'bg-media bg-compose';
+        const fill = document.createElement('img');
+        fill.className = 'bg-fill';
+        fill.alt = '';
+        fill.referrerPolicy = 'no-referrer';
+        fill.src = img.src;
+        img.className = 'bg-frame';
+        img.style.objectFit = '';
+        img.style.transform = '';
+        box.append(fill, img);
+        return { el: box, cleanup: () => {}, pause: () => {}, resume: () => {} };
+      };
+
       const makeImageLayer = (img) => {
+        const vw = window.innerWidth || 1280;
+        const vh = window.innerHeight || 720;
+        const screenRatio = vw / vh;
+        const imgRatio =
+          img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : screenRatio;
+        const ratioGap = Math.abs(imgRatio - screenRatio) / screenRatio;
+        // contain 模式本来就要完整画面；cover 模式仅在比例差超过 15% 时才介入
+        if (containFit || ratioGap > 0.15) return composeLayer(img);
         img.className = 'bg-media';
         img.dataset.objectUrl = '';
         applyFit(img);
@@ -720,7 +745,9 @@ export class BackgroundController {
         const dpr = Math.min(2, window.devicePixelRatio || 1);
         const needWidth = Math.max(1280, Math.round((window.innerWidth || 1280) * dpr));
         const itemId = record.item && record.item.id;
-        if (!itemId || img.naturalWidth >= needWidth) return img;
+        // 只有明显是缩略图（< 900px）才值得回详情页找更大图；
+        // 1024 的工坊官方预览已是原图，反复请求只会白白多一次网络
+        if (!itemId || img.naturalWidth >= Math.min(needWidth, 900)) return img;
         try {
           const assets = await fetchPreviewAssets(itemId);
           if (assets && assets.image && assets.image !== url) {

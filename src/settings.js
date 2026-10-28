@@ -231,10 +231,10 @@ export class SettingsDrawer {
             <div class="field">
               <label for="set-we-fit">背景显示方式</label>
               <select id="set-we-fit" class="select" data-path="background.weFit">
-                <option value="cover">填满屏幕（等比裁切，可能裁掉边缘）</option>
-                <option value="contain">完整显示（等比缩放，宽高比不同时留边）</option>
+                <option value="cover">尽量填满（比例差距大时自动改为完整显示）</option>
+                <option value="contain">完整显示（不裁切，四周用同图虚化铺底填满）</option>
               </select>
-              <div class="hint">浏览器地址栏 / 标签栏不算在背景显示区域内。觉得「显示不全」是填满模式在等比裁边——想看完整画面就切「完整显示」。</div>
+              <div class="hint">工坊预览多为方形件（约 1024px）：直接铺满会裁掉大半且发糊，所以比例差距大时会自动按「完整显示 + 虚化铺底」呈现，画面不裁切、也不放大。</div>
             </div>
             <button class="btn ghost sm" type="button" data-role="we-browse">${icon('image')}浏览创意工坊，挑壁纸 / 订阅 / 设背景</button>
             <div class="field" data-role="we-current" hidden>

@@ -206,46 +206,60 @@ function stripSteamImageParams(url) {
 }
 
 /**
- * 从条目详情页抓预览素材：动态视频地址 + 全尺寸截图。
- * API 的 preview_url 只是几百像素的缩略图，铺满起始页会发糊；
- * 详情页的大截图去掉压缩参数后即原始分辨率（通常 1080p+）。
+ * 从条目详情页抓预览素材：动态视频地址 + 原始预览图。
+ *
+ * 注意 Steam 已把详情页换成前端渲染（React）——首屏 HTML 里不再有
+ * #previewImage / <video> / og:image，直接抓详情页只会拿到空壳。
+ * 但带 insideModal=1（旧版快捷弹窗）的地址仍返回服务器渲染的旧标记，
+ * 预览图就在其中；workshop/filedetails 作为第二入口兜底。
+ * 预览图是 Steam 的方形裁切件（约 1024×1024），去掉 imw/imh/impolicy
+ * 等压缩参数后取到的就是原图。（是否方形由调用方判断并做完整显示处理。）
+ *
  * @param {string} id
  * @returns {Promise<{video:string|null, image:string|null}|null>} 失败返回 null，调用方自行降级
  */
 export async function fetchPreviewAssets(id) {
-  try {
-    // 带 Steam 会话：年龄门控的壁纸登录后才能拿到真实的视频与全尺寸截图
-    const response = await timedFetch(
-      `https://steamcommunity.com/sharedfiles/filedetails/?id=${id}`,
-      BROWSE_TIMEOUT,
-      { credentials: 'include' },
-    );
-    if (!response.ok) return null;
-    const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+  const endpoints = [
+    `https://steamcommunity.com/sharedfiles/filedetails/?id=${id}&insideModal=1`,
+    `https://steamcommunity.com/workshop/filedetails/?id=${id}`,
+    `https://steamcommunity.com/sharedfiles/filedetails/?id=${id}`,
+  ];
 
-    const videoEl = doc.querySelector('video');
-    const video =
-      ((videoEl && videoEl.querySelector('source[src]') && videoEl.querySelector('source[src]').src) ||
-        (videoEl && videoEl.getAttribute('src')) ||
-        null);
+  for (let i = 0; i < endpoints.length; i += 1) {
+    try {
+      // 带 Steam 会话：年龄门控的壁纸登录后才能拿到真实的视频与预览图
+      const response = await timedFetch(endpoints[i], BROWSE_TIMEOUT, { credentials: 'include' });
+      if (!response.ok) continue;
+      const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
 
-    // 全尺寸截图：主预览图优先，og:image 兜底，视频海报最后
-    let image = '';
-    const mainImg = doc.querySelector('#previewImage, img.workshopItemPreviewImageMain');
-    if (mainImg && mainImg.getAttribute('src')) image = mainImg.src;
-    if (!image && videoEl && videoEl.getAttribute('poster')) image = videoEl.getAttribute('poster');
-    if (!image) {
-      const og = doc.querySelector('meta[property="og:image"]');
-      if (og) image = og.getAttribute('content') || '';
+      const videoEl = doc.querySelector('video');
+      const video =
+        ((videoEl && videoEl.querySelector('source[src]') && videoEl.querySelector('source[src]').src) ||
+          (videoEl && videoEl.getAttribute('src')) ||
+          null);
+
+      let image = '';
+      const mainImg = doc.querySelector(
+        '#previewImage, img.workshopItemPreviewImageMain, img.workshopItemPreviewImageEnlargeable',
+      );
+      if (mainImg && mainImg.src) image = mainImg.src;
+      if (!image && videoEl && videoEl.getAttribute('poster')) image = videoEl.getAttribute('poster');
+      if (!image) {
+        const og = doc.querySelector('meta[property="og:image"]');
+        if (og) image = og.getAttribute('content') || '';
+      }
+
+      if (video || image) {
+        return {
+          video: video ? stripSteamImageParams(video) : null,
+          image: image ? stripSteamImageParams(image) : null,
+        };
+      }
+    } catch (err) {
+      /* 换下一个入口 */
     }
-
-    return {
-      video: video ? stripSteamImageParams(video) : null,
-      image: image ? stripSteamImageParams(image) : null,
-    };
-  } catch (err) {
-    return null;
   }
+  return null;
 }
 
 /**
@@ -357,8 +371,8 @@ export async function resolveWeBackground(bg) {
   const cache = await getRaw(STORAGE_KEYS.weCache).catch(() => null);
   const item = library[dayOfYear() % library.length];
 
-  // v2 = 全尺寸截图方案；老缓存（低清缩略图）自动失效重抓
-  if (cache && cache.v === 2 && cache.date === today && cache.id === item.id) {
+  // v3 = insideModal 旧版页面抓取方案；老缓存（低清缩略图 / 抓取失败结果）自动失效重抓
+  if (cache && cache.v === 3 && cache.date === today && cache.id === item.id) {
     return {
       image: stripSteamImageParams(cache.image || item.preview || ''),
       video: cache.video || null,
@@ -379,7 +393,7 @@ export async function resolveWeBackground(bg) {
     '';
   const video = (assets && assets.video) || null;
   await setRaw(STORAGE_KEYS.weCache, {
-    v: 2,
+    v: 3,
     date: today,
     id: item.id,
     image: stripSteamImageParams(image),
