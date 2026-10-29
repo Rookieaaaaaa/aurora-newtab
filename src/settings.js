@@ -38,10 +38,19 @@ import {
 } from './we-cloud.js';
 import { fetchWallhavenList } from './wallhaven.js';
 import {
+  clearLocalWebPackages,
   clearWeCacheDirHandle,
+  clearWeWebDirHandle,
   getWeCacheDirState,
+  getWeWebDirState,
+  listLocalWebPackages,
   reauthorizeWeCacheDir,
+  reauthorizeWeWebDir,
   setWeCacheDirHandle,
+  setWeWebDirHandle,
+  syncLocalWebPackage,
+  verifyWeWebDir,
+  MAX_WEB_PACKAGES,
 } from './we-cache.js';
 import {
   getSteamSession,
@@ -265,6 +274,15 @@ export class SettingsDrawer {
                 <button class="btn ghost sm" type="button" data-role="we-cache-dir-clear" hidden>恢复浏览器默认</button>
               </div>
               <div class="hint" data-role="we-cache-dir-state">未设置：缓存放浏览器内置存储（IndexedDB），无法自选磁盘位置。</div>
+            </div>
+            <div class="field">
+              <label>网页壁纸本地整包（最近 5 套，设成背景后零网络）</label>
+              <div class="ws-local-actions">
+                <button class="btn ghost sm" type="button" data-role="we-webdir-btn">选择本地包目录</button>
+                <button class="btn ghost sm" type="button" data-role="we-webpack-sync">同步当前网页壁纸</button>
+                <button class="btn ghost sm" type="button" data-role="we-webpack-clear">清空</button>
+              </div>
+              <div class="hint" data-role="we-webpack-state">网页壁纸是作者的原版页面，资源路径由它自己的脚本拼，扩展没法重写。所以只能把整包放进扩展目录、用 <code>chrome-extension://</code> 直接读盘。选一次 <code>扩展目录\assets\we-web</code> 即可，之后换任何网页壁纸都点「同步」。</div>
             </div>
             <button class="btn ghost sm" type="button" data-role="we-browse">${icon('image')}浏览创意工坊，挑壁纸 / 订阅 / 设背景</button>
             <div class="row">
@@ -856,6 +874,125 @@ export class SettingsDrawer {
         await refreshDirState();
       });
       refreshDirState();
+    }
+
+    // 网页壁纸整包：选一次扩展目录下的 assets\we-web，之后任意网页壁纸一键同步
+    const webDirBtn = this.root.querySelector('[data-role="we-webdir-btn"]');
+    const webPackSync = this.root.querySelector('[data-role="we-webpack-sync"]');
+    const webPackClear = this.root.querySelector('[data-role="we-webpack-clear"]');
+    const webPackState = this.root.querySelector('[data-role="we-webpack-state"]');
+    if (webDirBtn && webPackSync && webPackClear && webPackState) {
+      const formatBytes = (bytes) => {
+        const n = Number(bytes) || 0;
+        if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
+        if (n >= 1024 ** 2) return `${Math.round(n / 1024 ** 2)} MB`;
+        return `${Math.max(1, Math.round(n / 1024))} KB`;
+      };
+
+      const renderWebPackState = async (busyText) => {
+        if (busyText) {
+          webPackState.textContent = busyText;
+          return;
+        }
+        const [dir, packs] = await Promise.all([getWeWebDirState(), listLocalWebPackages()]);
+        if (!dir.configured) {
+          webPackState.textContent =
+            '未设置本地包目录：网页壁纸只能走云端直链（慢、耗流量）。点「选择本地包目录」，选中 扩展目录\\assets\\wallpapers。';
+          return;
+        }
+        if (!dir.usable) {
+          webPackState.textContent = `已选：${dir.name}，但权限需要重新确认——再点一次「选择本地包目录」授权。`;
+          return;
+        }
+        const total = packs.reduce((sum, row) => sum + row.bytes, 0);
+        const list = packs.length
+          ? packs
+              .map((row) =>
+                row.manual
+                  ? `${row.id}（手动放入）`
+                  : `${row.id}（${formatBytes(row.bytes)}${row.incomplete ? '，缺文件' : ''}）`,
+              )
+              .join('、')
+          : '还没有同步过';
+        webPackState.textContent = `已选：${dir.name} · 已缓存 ${packs.length}/${MAX_WEB_PACKAGES} 套，共 ${formatBytes(total)}：${list}`;
+      };
+
+      webDirBtn.addEventListener('click', async () => {
+        try {
+          if (typeof window.showDirectoryPicker !== 'function') {
+            toast('当前浏览器不支持选择文件夹（需要较新的 Chrome/Edge）', 'error');
+            return;
+          }
+          const state = await getWeWebDirState();
+          if (state.configured && !state.usable && (await reauthorizeWeWebDir())) {
+            toast('本地包目录已重新授权', 'ok');
+          } else {
+            const handle = await window.showDirectoryPicker({ id: 'aurora-we-web', mode: 'readwrite' });
+            // 路径猜不准：写个探针再从 chrome-extension:// 取回来，取得到才是对的目录
+            const ok = await verifyWeWebDir(handle);
+            if (!ok) {
+              toast('这个文件夹扩展读不到。请选中 扩展目录 下的 assets\\we-web 再试', 'error');
+              return;
+            }
+            await setWeWebDirHandle(handle);
+            toast('本地包目录已设置，之后点「同步当前网页壁纸」即可', 'ok');
+          }
+        } catch (err) {
+          if (err && err.name === 'AbortError') return;
+          toast(`设置失败：${describeError(err)}`, 'error');
+        }
+        await renderWebPackState();
+      });
+
+      webPackSync.addEventListener('click', async () => {
+        const settings = this.app.getSettings() || {};
+        const bg = settings.background || {};
+        const id = String(bg.weCloudItemId || '');
+        const cloud = readCloudConfig(bg, this.app.getSecrets() || {});
+        if (!id) {
+          toast('先把一张网页壁纸设为背景，再来同步', 'error');
+          return;
+        }
+        if (!isCloudReady(cloud)) {
+          toast('还没填云端服务地址', 'error');
+          return;
+        }
+        if (webPackSync.disabled) return;
+        webPackSync.disabled = true;
+        try {
+          const result = await syncLocalWebPackage(cloud, id, {
+            onProgress: ({ done, total, bytes }) =>
+              renderWebPackState(`同步中 ${done}/${total} 个文件，已下载 ${formatBytes(bytes)}（期间可以继续用浏览器）`),
+          });
+          toast(
+            result.missing.length
+              ? `已同步 ${result.done}/${result.total} 个文件，还有 ${result.missing.length} 个没下来，再点一次补漏`
+              : `整包已本地化：${result.total} 个文件、${formatBytes(result.bytes)}。重开新标签页就零网络了`,
+            result.missing.length ? 'error' : 'ok',
+          );
+        } catch (err) {
+          toast(`同步失败：${describeError(err)}`, 'error');
+        } finally {
+          webPackSync.disabled = false;
+          await renderWebPackState();
+        }
+      });
+
+      webPackClear.addEventListener('click', async () => {
+        const ok = await confirmDialog({
+          title: '清空本地整包',
+          message: '会删掉已经下到扩展目录里的网页壁纸整包（磁盘文件一起删）。云端不受影响。',
+          confirmText: '清空',
+          danger: true,
+        });
+        if (!ok) return;
+        await clearLocalWebPackages();
+        await clearWeWebDirHandle();
+        toast('本地整包已清空', 'ok');
+        await renderWebPackState();
+      });
+
+      renderWebPackState();
     }
 
     const weLocalScan = this.root.querySelector('[data-role="we-local-scan"]');

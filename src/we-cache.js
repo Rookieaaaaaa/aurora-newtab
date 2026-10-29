@@ -11,7 +11,7 @@
 
 import { STORAGE_KEYS } from './defaults.js';
 import { deleteMedia, getMedia, getRaw, saveMedia, setRaw } from './storage.js';
-import { fetchWebFileList, webAssetUrl } from './we-cloud.js';
+import { fetchWebFileList, isCloudReady, webAssetUrl } from './we-cloud.js';
 
 /** 最多保留几张壁纸（图片+视频算一张）。 */
 const MAX_WALLPAPERS = 5;
@@ -159,6 +159,284 @@ async function usableDir() {
   } catch (err) {
     return null;
   }
+}
+
+/* ---------------- 网页壁纸本地整包（chrome-extension:// 可直接加载） ---------------- */
+//
+// 为什么单独一套目录、还必须是扩展自己的目录：
+// 网页壁纸是 iframe 跑作者的原版页面，资源路径全是相对的、还有由它自己脚本动态
+// 拼出来的（images/${id}.jpg、media/original/${file}），扩展没法可靠地重写。
+// 唯一能让它零网络的办法是让整包有一个 chrome-extension:// 前缀——也就是文件必须
+// 落在扩展安装目录里。这个目录由用户授权一次，之后同步整包、LRU 淘汰都在这里做。
+// 装成 crx（目录只读）时这里必然失败，调用方静默回落到云端直链。
+
+const WEB_DIR_KEY = 'webDir';
+
+/** 最多保留几套网页壁纸整包（与图片/视频的 LRU 口径一致）。 */
+export const MAX_WEB_PACKAGES = 5;
+
+/** 整包索引：{ items: { [壁纸ID]: { at, bytes, files:[], incomplete } } } */
+const LOCAL_WEB_KEY = 'weLocalWeb';
+
+/** 记住「网页壁纸本地包」根目录。 */
+export function setWeWebDirHandle(handle) {
+  return saveStoredHandle(WEB_DIR_KEY, handle);
+}
+
+/** 忘记根目录（不动磁盘上的包）。 */
+export async function clearWeWebDirHandle() {
+  try {
+    const db = await openDirDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(DIR_STORE, 'readwrite');
+      tx.objectStore(DIR_STORE).delete(WEB_DIR_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (err) {
+    /* ignore */
+  }
+}
+
+/** 已记住的整包根目录（不看权限，用于重新授权）。 */
+async function loadWebDirHandle() {
+  return loadStoredHandle(WEB_DIR_KEY);
+}
+
+/** 可写的整包根目录；没设或权限失效返回 null。 */
+export async function usableWebDir() {
+  const handle = await loadWebDirHandle();
+  if (!handle) return null;
+  try {
+    if ((await handle.queryPermission({ mode: 'readwrite' })) !== 'granted') return null;
+    return handle;
+  } catch (err) {
+    return null;
+  }
+}
+
+/** 重授权（需用户手势）。 */
+export async function reauthorizeWeWebDir() {
+  const handle = await loadWebDirHandle();
+  if (!handle) return false;
+  try {
+    return (await handle.requestPermission({ mode: 'readwrite' })) === 'granted';
+  } catch (err) {
+    return false;
+  }
+}
+
+/** 当前整包目录状态（设置面板展示用）。 */
+export async function getWeWebDirState() {
+  const handle = await loadWebDirHandle();
+  if (!handle) return { configured: false, usable: false, name: '', permission: 'none' };
+  let permission = 'granted';
+  try {
+    permission = await handle.queryPermission({ mode: 'readwrite' });
+  } catch (err) {
+    permission = 'prompt';
+  }
+  return { configured: true, usable: permission === 'granted', permission, name: handle.name };
+}
+
+/**
+ * 验证这个文件夹是不是「扩展能直接读到」的那一个（…\assets\wallpapers）。
+ * 猜路径不可靠，直接写个探针文件再从 chrome-extension:// 取回来——取得到才算数。
+ * @param {FileSystemDirectoryHandle} handle
+ * @returns {Promise<boolean>}
+ */
+export async function verifyWeWebDir(handle) {
+  if (!handle) return false;
+  const name = `__probe-${Date.now()}.txt`;
+  try {
+    await writeDirFile(handle, name, new Blob(['ok'], { type: 'text/plain' }));
+    const url = chrome.runtime.getURL(`assets/we-web/${name}`);
+    const res = await fetch(url, { cache: 'no-store' });
+    const ok = res.ok && (await res.text()) === 'ok';
+    await handle.removeEntry(name).catch(() => false);
+    return ok;
+  } catch (err) {
+    return false;
+  }
+}
+
+/** 读整包索引。 */
+export async function loadLocalWebPackages() {
+  const raw = await getRaw(LOCAL_WEB_KEY).catch(() => null);
+  if (!raw || typeof raw !== 'object' || !raw.items || typeof raw.items !== 'object') {
+    return { items: {} };
+  }
+  return { items: raw.items };
+}
+
+/** 已缓存的整包列表（最近使用在前）。 */
+export async function listLocalWebPackages() {
+  const index = await loadLocalWebPackages();
+  return Object.entries(index.items)
+    .map(([id, row]) => ({ id, at: Number(row.at) || 0, bytes: Number(row.bytes) || 0, files: Number(row.files && row.files.length) || 0, incomplete: Number(row.incomplete) || 0, manual: row.manual === true }))
+    .sort((a, b) => b.at - a.at);
+}
+
+/** 目录里这个文件的大小（断点续传用）；不存在返回 -1。 */
+async function dirFileSize(rootDir, relPath) {
+  try {
+    const segs = String(relPath).split('/').filter(Boolean);
+    const name = segs.pop();
+    let cur = rootDir;
+    for (const seg of segs) cur = await cur.getDirectoryHandle(seg);
+    const handle = await cur.getFileHandle(name);
+    const file = await handle.getFile();
+    return file.size;
+  } catch (err) {
+    return -1;
+  }
+}
+
+/** 超过 MAX_WEB_PACKAGES 时删最旧的整包（连目录一起）。 */
+async function evictWebPackages(index, dir) {
+  const rows = Object.entries(index.items).sort((a, b) => (b[1].at || 0) - (a[1].at || 0));
+  const drop = rows.slice(MAX_WEB_PACKAGES).map(([key]) => key);
+  for (const key of drop) {
+    if (dir) await dir.removeEntry(key, { recursive: true }).catch(() => false);
+    delete index.items[key];
+  }
+  return drop;
+}
+
+/**
+ * 这套整包在本地是否完整可用。
+ *
+ * - ready    索引登记过、文件齐了 → 可以放心用 chrome-extension:// 加载
+ * - partial  正在同步 / 上次没下完 → 不能用（视频会 404，壁纸直接坏）
+ * - unknown  没登记过（用户手动把包丢进 assets/we-web）→ 交给调用方探测
+ *
+ * @param {string} id
+ * @returns {Promise<'ready'|'partial'|'unknown'>}
+ */
+export async function localWebPackageState(id) {
+  const index = await loadLocalWebPackages();
+  const row = index.items[String(id || '')];
+  if (!row) return 'unknown';
+  return Number(row.incomplete) > 0 ? 'partial' : 'ready';
+}
+
+/**
+ * 首次探测到「手动放进 assets/wallpapers」的整包时补一条索引，
+ * 让设置面板统计得到、LRU 也算得上。已有条目不动（不刷使用时间，避免每次开新标签写库）。
+ * @param {string} id
+ */
+export async function markLocalWebPackage(id) {
+  const key = String(id || '').trim();
+  if (!key) return;
+  const index = await loadLocalWebPackages();
+  if (index.items[key]) return;
+  index.items[key] = { at: Date.now(), bytes: 0, files: [], incomplete: 0, manual: true };
+  await setRaw(LOCAL_WEB_KEY, index).catch(() => false);
+}
+
+/** 删一套本地整包。 */
+export async function removeLocalWebPackage(id) {  const key = String(id || '').trim();
+  if (!key) return false;
+  const index = await loadLocalWebPackages();
+  const dir = await usableWebDir();
+  if (dir) await dir.removeEntry(key, { recursive: true }).catch(() => false);
+  if (index.items[key]) {
+    delete index.items[key];
+    await setRaw(LOCAL_WEB_KEY, index).catch(() => false);
+  }
+  return true;
+}
+
+/** 清空全部本地整包。 */
+export async function clearLocalWebPackages() {
+  const index = await loadLocalWebPackages();
+  const dir = await usableWebDir();
+  for (const key of Object.keys(index.items)) {
+    if (dir) await dir.removeEntry(key, { recursive: true }).catch(() => false);
+  }
+  await setRaw(LOCAL_WEB_KEY, { items: {} }).catch(() => false);
+  return true;
+}
+
+/**
+ * 把一套网页壁纸整包同步到本地目录。
+ *
+ * 逐文件下载、4 并发、单文件重试 3 次、已存在则跳过（中断后再点能接着下）。
+ * 下完的包在扩展目录里，iframe 用 chrome-extension:// 直接读盘，一个字节都不出海。
+ *
+ * @param {{url:string, token:string}} cloud 云服务配置
+ * @param {string} id 壁纸 ID
+ * @param {{onProgress?:Function, force?:boolean}} [options]
+ * @returns {Promise<{id:string, total:number, done:number, bytes:number, missing:string[], dropped:string[]}>}
+ */
+export async function syncLocalWebPackage(cloud, id, options = {}) {
+  const key = String(id || '').trim();
+  if (!key) throw new Error('缺少壁纸 ID');
+  if (!isCloudReady(cloud)) throw new Error('未配置云服务地址');
+  const dir = await usableWebDir();
+  if (!dir) throw new Error('还没选本地包目录（扩展目录下的 assets\\wallpapers）');
+
+  const files = await fetchWebFileList(cloud, key);
+  if (!files.length) throw new Error('云端没有这套壁纸的文件清单（/web/files 为空）');
+
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+  const force = options.force === true;
+
+  let cursor = 0;
+  let finished = 0;
+  let bytes = 0;
+  let failed = 0;
+  const okFiles = [];
+
+  const worker = async () => {
+    while (cursor < files.length) {
+      const file = files[cursor];
+      cursor += 1;
+      try {
+        const present = force ? -1 : await dirFileSize(dir, `${key}/${file}`);
+        if (present >= 0) {
+          bytes += present;
+          okFiles.push(file);
+        } else {
+          const url = webAssetUrl(cloud, key, file);
+          let blob = null;
+          for (let attempt = 0; attempt < 3 && !blob; attempt += 1) {
+            try {
+              const res = await fetch(url, { credentials: 'omit' });
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              const got = await res.blob();
+              if (got && got.size) blob = got;
+            } catch (err) {
+              if (attempt === 2) throw err;
+              await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+            }
+          }
+          await writeDirFile(dir, `${key}/${file}`, blob);
+          bytes += blob.size;
+          okFiles.push(file);
+        }
+      } catch (err) {
+        failed += 1;
+      }
+      finished += 1;
+      if (onProgress) onProgress({ done: finished, total: files.length, bytes, failed });
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(4, files.length) }, worker));
+
+  const missing = files.filter((file) => !okFiles.includes(file));
+  const index = await loadLocalWebPackages();
+  index.items[key] = {
+    at: Date.now(),
+    bytes,
+    files: okFiles,
+    incomplete: missing.length,
+  };
+  const dropped = await evictWebPackages(index, dir);
+  await setRaw(LOCAL_WEB_KEY, index).catch(() => false);
+
+  return { id: key, total: files.length, done: okFiles.length, bytes, missing, dropped };
 }
 
 function extOf(mime) {

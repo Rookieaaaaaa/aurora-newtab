@@ -6,7 +6,7 @@
 import { AIPanel } from './ai-panel.js';
 import { BackgroundController } from './background.js';
 import { Clock } from './clock.js';
-import { DEFAULT_SECRETS, DEFAULT_SETTINGS, DEFAULT_SITES } from './defaults.js';
+import { APP_VERSION, DEFAULT_SECRETS, DEFAULT_SETTINGS, DEFAULT_SITES } from './defaults.js';
 import { closeTopModal, initDialog, toast } from './dialog.js';
 import { Dock } from './dock.js';
 import { setIcon } from './icons.js';
@@ -321,7 +321,7 @@ async function bootstrap() {
     if (!document.hidden && clock) clock.render();
   });
 
-  console.info('[aurora] 新标签页已就绪');
+  console.info(`[aurora] 新标签页已就绪 v${APP_VERSION}`);
 }
 
 if (document.readyState === 'loading') {

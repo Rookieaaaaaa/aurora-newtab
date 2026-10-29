@@ -4,7 +4,7 @@
  * 特性：双层交叉淡入（400ms）、模糊与暗化实时生效、失败自动降级到渐变、页面隐藏时暂停。
  */
 
-import { BING_API, GRADIENTS, STORAGE_KEYS } from './defaults.js';
+import { APP_VERSION, BING_API, GRADIENTS, STORAGE_KEYS } from './defaults.js';
 import { getMedia, getRaw, setRaw } from './storage.js';
 import {
   fetchWallhavenBlob,
@@ -21,7 +21,13 @@ import {
   isCloudReady,
   readCloudConfig,
 } from './we-cloud.js';
-import { cacheWeAssetFromUrl, ensureWeWebPrefetch, getCachedWeAsset } from './we-cache.js';
+import {
+  cacheWeAssetFromUrl,
+  ensureWeWebPrefetch,
+  getCachedWeAsset,
+  localWebPackageState,
+  markLocalWebPackage,
+} from './we-cache.js';
 import { fetchPreviewAssets, recordWeApply, resolveWeBackground } from './weworkshop.js';
 
 const FADE_MS = 400;
@@ -204,6 +210,139 @@ function probeVideoMeta(url, timeout = VIDEO_TIMEOUT) {
     video.addEventListener('error', onErr);
     video.src = url;
   });
+}
+
+/** 网页壁纸本地整包根目录：assets/we-web/<壁纸ID>/index.html。 */
+const LOCAL_WEB_DIR = 'assets/we-web';
+
+/** 老版本放包的位置（目录迁移前），只为兼容已安装的旧副本，新代码优先用上面那个。 */
+const LOCAL_WEB_DIR_LEGACY = 'assets/wallpapers';
+
+/**
+ * 查某张网页壁纸是否已随扩展打包在本地。
+ *
+ * 网页壁纸（WE type=web）本质是一个 iframe 跑作者的原版页面，里面的
+ * <video> 由页面自己的 JS 管理，扩展没法替它做缓存——只能决定 iframe
+ * 从哪个源加载。放在扩展目录里就能以 chrome-extension:// 直接读盘，
+ * 一个字节都不出海：省掉云端往返、代理链路与 HTTP 缓存淘汰。
+ *
+ * @param {string} id 壁纸 ID
+ * @returns {Promise<string>} 入口地址；没打包返回空串
+ */
+async function localWebEntryUrl(id) {
+  const key = String(id || '').trim();
+  if (!key) return '';
+  if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.getURL) return '';
+  // 同步到一半的包不能用：index.html 在、视频还没下来，iframe 会满屏 404
+  const state = await localWebPackageState(key).catch(() => 'unknown');
+  if (state === 'partial') return '';
+  for (const dir of [LOCAL_WEB_DIR, LOCAL_WEB_DIR_LEGACY]) {
+    let url = '';
+    try {
+      // 带版本号：浏览器会按 URL 缓存扩展资源，换版本号才能逼它重新读盘
+      url = `${chrome.runtime.getURL(`${dir}/${key}/index.html`)}?v=${encodeURIComponent(APP_VERSION)}`;
+    } catch (err) {
+      continue;
+    }
+    try {
+      // 本地读盘正常是毫秒级；超过 3 秒当它卡住，别再挂着占位图干等
+      const res = await Promise.race([
+        fetch(url, { cache: 'no-store' }),
+        new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+      ]);
+      if (!res || !res.ok) continue;
+      if (!(res.headers.get('content-type') || '').includes('html')) continue;
+      // 手动丢进来的包没有索引条目，补一条（只补一次），
+      // 设置面板才统计得到它、LRU 才算得上它
+      if (state === 'unknown') markLocalWebPackage(key).catch(() => {});
+      return url;
+    } catch (err) {
+      /* 换下一个目录 */
+    }
+  }
+  return '';
+}
+
+/**
+ * 网页壁纸图层：一个跑作者页面的 iframe。
+ * @param {string} url 入口地址（云端或本地打包）
+ */
+function makeWebLayer(url) {
+  const frame = document.createElement('iframe');
+  frame.className = 'bg-media we-web-frame';
+  frame.src = url;
+  frame.title = '网页壁纸';
+  // 沙箱:allow-same-origin 让壁纸能用自己的源访问 localStorage——绝大多数网页
+  // 壁纸启动就读它，不给这条会直接抛 SecurityError 黑屏。代价是壁纸脚本与扩展
+  // 同源（打包进扩展后还能摸到 chrome.*），因此只装可信来源的网页壁纸。
+  frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-pointer-lock');
+  frame.setAttribute('scrolling', 'no');
+  frame.style.border = '0';
+  ensureWallpaperPlays(frame);
+  return {
+    el: frame,
+    cleanup: () => {
+      frame.setAttribute('src', 'about:blank');
+    },
+    // 隐藏/最小化时浏览器会自动节流 iframe 的 rAF 与定时器，无需手动暂停
+    pause: () => {},
+    resume: () => {},
+  };
+}
+
+/** 壁纸自己的偏好键（作者原版就用这个）。 */
+const WALLPAPER_PREFS_KEY = 'guoman.desktop-companion.personal-v2';
+
+/**
+ * 父页面兜底：确保壁纸走「单套循环」。
+ *
+ * 为什么父页面要管：壁纸入口里那段「设成单套循环」的脚本在作者原版是内联的，
+ * 扩展页 CSP 不允许内联脚本，只能靠随包的 bootstrap.js 顶上。可一旦浏览器
+ * 缓存了旧版 index.html（内联脚本版），bootstrap 根本不会执行，壁纸就停在
+ * 作者默认的 freeze 模式——播一遍定格成一张图，看着像「预览图」。
+ *
+ * 同源 iframe 可以直接改它的 localStorage，改完刷一次就生效，
+ * 完全不依赖 index.html 是新是旧。
+ *
+ * @param {HTMLIFrameElement} frame
+ */
+function ensureWallpaperPlays(frame) {
+  if (!String(frame.src || '').startsWith('chrome-extension://')) return;
+  let fixed = false;
+  frame.addEventListener('load', () => {
+    if (fixed) return;
+    try {
+      const win = frame.contentWindow;
+      const storage = win.localStorage;
+      const prefs = JSON.parse(storage.getItem(WALLPAPER_PREFS_KEY) || '{}') || {};
+      const modes = prefs.wardrobeModes || {};
+      const allSingle = Object.keys(modes).every((group) => modes[group] === 'single');
+      if (prefs.playbackMode === 'single' && allSingle) return;
+      prefs.playbackMode = 'single';
+      prefs.wardrobeModes = {};
+      storage.setItem(WALLPAPER_PREFS_KEY, JSON.stringify(prefs));
+      fixed = true;
+      // 偏好只在启动时读一次，得让它重来一遍
+      win.location.reload();
+    } catch (err) {
+      /* 跨源或权限不足就交给壁纸自己，不要影响显示 */
+    }
+  });
+}
+
+/**
+ * 探测网页入口是否真的可用（服务端没实现 web 目录 / 没带 token 鉴权时
+ * 会 404/401，那种情况下静默回落图片/视频，不能给用户看一个白色错误页）。
+ * @param {string} url
+ */
+async function probeWebEntry(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return false;
+    return (res.headers.get('content-type') || '').includes('html');
+  } catch (err) {
+    return false;
+  }
 }
 
 /**
@@ -630,8 +769,20 @@ export class BackgroundController {
     let disposed = false;
     let current = null;
 
-    const adopt = (layer) => {
+    /**
+     * 把一层放进容器。
+     * @param {object} layer
+     * @param {boolean} [isPlaceholder] 占位图专用：只填空档，绝不顶掉已有的真层
+     */
+    const adopt = (layer, isPlaceholder = false) => {
       if (disposed) {
+        if (layer && typeof layer.cleanup === 'function') layer.cleanup();
+        return;
+      }
+      // 占位图是「先垫一张」用的。本地整包让 iframe 秒开，占位图反而后到，
+      // 以前它会把已经显示出来的 iframe 踩掉——表现就是「视频一闪而过，
+      // 然后跳回预览图」。谁先到不重要，真层永远优先。
+      if (isPlaceholder && current) {
         if (layer && typeof layer.cleanup === 'function') layer.cleanup();
         return;
       }
@@ -663,26 +814,46 @@ export class BackgroundController {
             return;
           }
           img.className = 'bg-media';
-          adopt({
-            el: img,
-            cleanup: () => this.revokeUrl(url),
-            pause: () => {},
-            resume: () => {},
-          });
+          adopt(
+            {
+              el: img,
+              cleanup: () => this.revokeUrl(url),
+              pause: () => {},
+              resume: () => {},
+            },
+            true,
+          );
         } catch (err) {
           /* 占位失败不影响主流程 */
         }
       })();
     }
 
-    // 真正的层：网络就绪后替换
+    // 真正的层：网络就绪后替换。构建失败时重试一次——一次偶发失败
+    // （扩展刚启动时读盘失败、iframe 还没起来）不该让预览图挂一整天。
     (async () => {
-      try {
-        const layer = await buildReal();
-        adopt(layer);
-      } catch (err) {
-        console.warn('[background] 工坊背景构建失败，保留占位：', err);
+      let lastError = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (disposed) return;
+        try {
+          const layer = await buildReal();
+          if (disposed) {
+            if (layer && typeof layer.cleanup === 'function') layer.cleanup();
+            return;
+          }
+          adopt(layer);
+          return;
+        } catch (err) {
+          lastError = err;
+          if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 1200));
+        }
       }
+      if (disposed) return;
+      const reason = (lastError && lastError.message) || '素材不可用';
+      console.warn('[background] 工坊背景构建失败：', reason, lastError);
+      // 连占位图都没有时别把页面留成黑的（新装机 / 没选壁纸就是这种），
+      // 换成动态渐变——至少是个能看的背景，而不是一片黑
+      if (!current) adopt(createGradientLayer('forest', true));
     })();
 
     return {
@@ -765,6 +936,13 @@ export class BackgroundController {
       // 整层延迟构建：先用本地缓存的上次预览图占位（毫秒级），
     // 云端素材（网页/视频/原图）就绪后原位替换，消除首屏黑屏
       return this.makeDeferredWeLayer(bg, async () => {
+        // 本地整包优先：网页壁纸若已随扩展打包（assets/we-web/<id>），
+        // 直接以 chrome-extension:// 加载——零网络、零代理、零缓存淘汰，
+        // 页面里的 4K 成片从磁盘读，切换/循环都不用等下载。
+        // 必须放在云端请求之前：命中时一个网络请求都不发。
+        const localWeb = await localWebEntryUrl(bg.weCloudItemId || bg.weItemId);
+        if (localWeb) return makeWebLayer(localWeb);
+
         // Wallpaper Engine 创意工坊：分辨率自适应——
         // 工坊预览视频多为 720p webm，铺满高分屏会发糊；视频元数据不够屏幕宽度时
         // 改用全尺寸截图，截图加载失败再回视频，两者都失败才报错
@@ -879,41 +1057,6 @@ export class BackgroundController {
               if (promise && typeof promise.catch === 'function') promise.catch(() => {});
             },
           };
-        };
-
-        const makeWebLayer = (url) => {
-          const frame = document.createElement('iframe');
-          frame.className = 'bg-media we-web-frame';
-          frame.src = url;
-          frame.title = '网页壁纸';
-          // 沙箱:allow-same-origin 让壁纸能用自己的源(wall.xiaobai.uno)访问
-          // localStorage——绝大多数网页壁纸启动就读它,不给这条会直接抛
-          // SecurityError 黑屏。壁纸代码因此与云服务同源(能读到自身 URL 里的
-          // token),只浏览可信作者的壁纸
-          frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-pointer-lock');
-          frame.setAttribute('scrolling', 'no');
-          frame.style.border = '0';
-          return {
-            el: frame,
-            cleanup: () => {
-              frame.setAttribute('src', 'about:blank');
-            },
-            // 隐藏/最小化时浏览器会自动节流 iframe 的 rAF 与定时器,无需手动暂停
-            pause: () => {},
-            resume: () => {},
-          };
-        };
-
-        // 探测网页入口是否真的可用(服务端没实现 web 目录 / 没带 ?token= 鉴权时
-        // 会 404/401,那种情况下静默回落图片/视频,不能给用户看一个白色错误页)
-        const probeWebEntry = async (url) => {
-          try {
-            const res = await fetch(url);
-            if (!res.ok) return false;
-            return (res.headers.get('content-type') || '').includes('html');
-          } catch (err) {
-            return false;
-          }
         };
 
         // 比例差过大时（Steam 的工坊预览是方形件），cover 会把画面裁得只剩中间一条。

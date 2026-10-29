@@ -3,7 +3,7 @@
  */
 
 export const APP_NAME = 'Aurora New Tab';
-export const APP_VERSION = '0.5.0';
+export const APP_VERSION = '0.5.3';
 export const SETTINGS_VERSION = 1;
 
 /** 默认系统提示词（设置里留空时使用）。 */

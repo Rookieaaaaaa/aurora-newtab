@@ -313,7 +313,8 @@ export function steamThumbUrl(url, size) {
     imh: String(size),
     letterbox: 'true',
   });
-  return `${base}?${query}`;
+  // 原地址若还带着自己的查询串（如自建云的 token），得用 & 接
+  return `${base}${base.includes('?') ? '&' : '?'}${query}`;
 }
 
 /** 探测结果缓存：同一张图在一个会话里只探一次。 */
@@ -541,8 +542,25 @@ export async function fetchDetails(ids) {
  * @param {string} url
  * @returns {string}
  */
+/** Steam CDN 的压缩参数。只去这些——自建云的 `?token=` 必须留着，剥掉就 401。 */
+const STEAM_IMAGE_PARAMS = /^(imw|imh|ima|imc|imsc|impolicy|imcolor|letterbox|crop)$/i;
+
 function stripSteamImageParams(url) {
-  return String(url || '').replace(/\?.*$/, '');
+  const raw = String(url || '').trim();
+  if (!raw || raw.indexOf('?') === -1) return raw;
+  try {
+    const parsed = new URL(raw);
+    let touched = false;
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (STEAM_IMAGE_PARAMS.test(key)) {
+        parsed.searchParams.delete(key);
+        touched = true;
+      }
+    }
+    return touched ? parsed.toString() : raw;
+  } catch (err) {
+    return raw;
+  }
 }
 
 /**
